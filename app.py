@@ -673,6 +673,106 @@ def print_invoice(invoice_number):
         total=invoice_data['amount']
     )
 
+@app.route("/tax-guide")
+def tax_guide():
+    """KRA Tax Filing Guide"""
+    return render_template_string("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KRA Tax Guide - KenyaComply</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        .card { background: white; padding: 20px; border-radius: 10px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a2e; }
+        h2 { color: #16213e; margin-top: 25px; }
+        .nav { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .nav a { background: #1a1a2e; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; }
+        .nav a:hover { background: #16213e; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background: #f0f0f0; }
+        .highlight { background: #e3f2fd; padding: 15px; border-radius: 8px; }
+        .deadline { color: #d32f2f; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>📋 KRA Tax Filing Guide - Kenya</h1>
+    
+    <div class="nav">
+        <a href="/">🏠 Home</a>
+        <a href="/dashboard">📊 Dashboard</a>
+    </div>
+    
+    <div class="card">
+        <h2>📅 Tax Deadlines</h2>
+        <table>
+            <tr><th>Tax Type</th><th>Who</th><th>Deadline</th></tr>
+            <tr><td>PAYE</td><td>Employers</td><td class="deadline">30th of next month</td></tr>
+            <tr><td>Income Tax</td><td>Individuals</td><td class="deadline">30th April</td></tr>
+            <tr><td>Corporate Tax</td><td>Companies</td><td class="deadline">30th June</td></tr>
+            <tr><td>VAT</td><td>VAT-registered</td><td class="deadline">20th of next month</td></tr>
+        </table>
+    </div>
+    
+    <div class="card">
+        <h2>💰 How to File Income Tax (Individual)</h2>
+        <ol>
+            <li>Go to <a href="https://itax.kra.go.ke" target="_blank">itax.kra.go.ke</a></li>
+            <li>Login with your KRA PIN</li>
+            <li>Select Returns → Income Tax</li>
+            <li>Fill: Gross salary, deductions, benefits</li>
+            <li>Submit</li>
+        </ol>
+    </div>
+    
+    <div class="card">
+        <h2>💼 How to File PAYE (Employer)</h2>
+        <ol>
+            <li>Calculate employee tax using <strong>P10 form</strong></li>
+            <li>File monthly via iTax</li>
+            <li>Pay by 30th of next month</li>
+        </ol>
+    </div>
+    
+    <div class="card">
+        <h2>🏢 Corporate Tax (Company)</h2>
+        <ul>
+            <li><strong>Rate:</strong> 30% of taxable income</li>
+            <li><strong>SME (< KES 500M):</strong> 25%</li>
+            <li><strong>Deadline:</strong> 30th June annually</li>
+        </ul>
+    </div>
+    
+    <div class="card">
+        <h2>🧾 VAT Filing</h2>
+        <ul>
+            <li><strong>Rate:</strong> 16% standard</li>
+            <li><strong>Threshold:</strong> KES 5M/year</li>
+            <li><strong>Deadline:</strong> 20th of next month</li>
+        </ul>
+    </div>
+    
+    <div class="card highlight">
+        <h2>🔗 KenyaComply + KRA</h2>
+        <p>Generate invoices in KenyaComply → Download → Upload to KRA portal</p>
+        <p><strong>Coming soon:</strong> Auto-submit to KRA via API</p>
+    </div>
+    
+    <div class="card">
+        <h2>📞 KRA Contact</h2>
+        <ul>
+            <li>Call: 020-281-1100</li>
+            <li>Email: callcentre@kra.go.ke</li>
+            <li>WhatsApp: 072-888-1111</li>
+        </ul>
+    </div>
+</body>
+</html>
+""")
+
 @app.route("/health")
 def health():
     return {"status": "ok", "service": "kenya-comply"}

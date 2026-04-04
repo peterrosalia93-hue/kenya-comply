@@ -34,6 +34,31 @@ Generate invoice → Download → Upload manually to KRA portal
 
 ---
 
+## iTax Connection
+
+### Manual (Now)
+- Download invoice from KenyaComply
+- Upload to iTax portal manually
+
+### Automatic (API Required)
+- Requires KRA API credentials
+- Apply via eCitizen → KRA → API Access
+
+---
+
+## Tax Filing Integration
+
+KenyaComply can help with:
+
+| Tax Type | KenyaComply Role |
+|---------|---------------|
+| **Invoice Generation** | Creates KRA-compliant invoices |
+| **PAYE** | Calculate from salary (ready) |
+| **VAT** | Calculate VAT on sales |
+| **Corporate Tax** | Track deductions |
+
+---
+
 ## Current Invoice Format (KRA-Compliant)
 
 The invoice generated includes:
