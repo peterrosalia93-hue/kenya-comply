@@ -647,6 +647,120 @@ def api_vat():
         "net_vat_payable": result.net_vat_payable
     })
 
+@app.route("/paye-calculator")
+def paye_calculator():
+    """PAYE Calculator Page"""
+    return render_template_string("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PAYE Calculator - KenyaComply</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        .card { background: white; padding: 25px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a2e; text-align: center; }
+        .nav { display: flex; gap: 10px; margin-bottom: 20px; justify-content: center; }
+        .nav a { background: #1a1a2e; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; color: #333; }
+        input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
+        button { background: #1a1a2e; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 16px; width: 100%; cursor: pointer; font-weight: 600; }
+        .result { background: #e8f5e9; padding: 20px; border-radius: 8px; margin-top: 20px; }
+        .result-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #c8e6c9; }
+        .highlight { color: #2e7d32; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>💰 PAYE Calculator</h1>
+    <div class="nav"><a href="/">Home</a><a href="/tax-guide">Tax Guide</a></div>
+    <div class="card">
+        <div class="form-group"><label>Gross Salary (KES)</label><input type="number" id="salary" placeholder="100000"></div>
+        <div class="form-group"><label>Benefits (KES)</label><input type="number" id="benefits" value="0"></div>
+        <button onclick="calculatePAYE()">Calculate PAYE</button>
+    </div>
+    <div class="card" id="result" style="display:none;">
+        <div class="result-row"><span>Gross</span><span id="gross">0</span></div>
+        <div class="result-row"><span>Taxable</span><span id="taxable">0</span></div>
+        <div class="result-row"><span>PAYE</span><span class="highlight" id="paye">0</span></div>
+        <div class="result-row"><span>Net</span><span class="highlight" id="net">0</span></div>
+    </div>
+    <script>
+        async function calculatePAYE() {
+            const gross = parseFloat(document.getElementById('salary').value) || 0;
+            const benefits = parseFloat(document.getElementById('benefits').value) || 0;
+            const resp = await fetch('/api/paye', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({salary: gross+benefits})});
+            const r = await resp.json();
+            document.getElementById('gross').textContent = 'KES '+gross.toLocaleString();
+            document.getElementById('taxable').textContent = 'KES '+(gross+benefits).toLocaleString();
+            document.getElementById('paye').textContent = 'KES '+Math.round(r.monthly_tax).toLocaleString();
+            document.getElementById('net').textContent = 'KES '+Math.round(gross+benefits-r.monthly_tax).toLocaleString();
+            document.getElementById('result').style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+""")
+
+@app.route("/vat-filing")
+def vat_filing():
+    """VAT Filing Calculator"""
+    return render_template_string("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VAT Calculator - KenyaComply</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        .card { background: white; padding: 25px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        h1 { color: #1a1a2e; text-align: center; }
+        .nav { display: flex; gap: 10px; margin-bottom: 20px; justify-content: center; }
+        .nav a { background: #1a1a2e; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; color: #333; }
+        input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
+        button { background: #1a1a2e; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 16px; width: 100%; cursor: pointer; font-weight: 600; }
+        .result { background: #e3f2fd; padding: 20px; border-radius: 8px; margin-top: 20px; }
+        .result-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #bbdefb; }
+        .highlight { color: #1565c0; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>VAT Calculator</h1>
+    <div class="nav"><a href="/">Home</a><a href="/tax-guide">Tax Guide</a></div>
+    <div class="card">
+        <div class="form-group"><label>Total Sales (KES)</label><input type="number" id="sales" placeholder="100000"></div>
+        <div class="form-group"><label>Exempt Sales (KES)</label><input type="number" id="exempt" value="0"></div>
+        <div class="form-group"><label>Input VAT (KES)</label><input type="number" id="input_vat" value="0"></div>
+        <button onclick="calculateVAT()">Calculate VAT</button>
+    </div>
+    <div class="card" id="result" style="display:none;">
+        <div class="result-row"><span>Gross Sales</span><span id="gross">0</span></div>
+        <div class="result-row"><span>VAT Collected</span><span id="collected">0</span></div>
+        <div class="result-row"><span>Input VAT</span><span id="input">0</span></div>
+        <div class="result-row"><span>VAT Due</span><span class="highlight" id="due">0</span></div>
+    </div>
+    <script>
+        async function calculateVAT() {
+            const sales = parseFloat(document.getElementById('sales').value) || 0;
+            const exempt = parseFloat(document.getElementById('exempt').value) || 0;
+            const input = parseFloat(document.getElementById('input_vat').value) || 0;
+            const resp = await fetch('/api/vat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sales, exempt, input_vat: input})});
+            const r = await resp.json();
+            document.getElementById('gross').textContent = 'KES '+sales.toLocaleString();
+            document.getElementById('collected').textContent = 'KES '+Math.round(r.vat_collected||0).toLocaleString();
+            document.getElementById('input').textContent = 'KES '+input.toLocaleString();
+            document.getElementById('due').textContent = 'KES '+Math.round(r.net_vat_payable||0).toLocaleString();
+            document.getElementById('result').style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+""")
+
 @app.route("/print/<invoice_number>")
 def print_invoice(invoice_number):
     """Print-friendly invoice view"""
