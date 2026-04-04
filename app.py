@@ -297,6 +297,8 @@ HTML_TEMPLATE = """
         .download-btn:hover { background: #1b5e20; }
         .print-btn:hover { background: #0d47a1; }
         .btn-row { display: flex; gap: 10px; margin-top: 15px; }
+        .payment-notice { background: #fff3cd; color: #856404; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: 600; text-align: center; }
+        .payment-status { background: #d4edda; color: #155724; padding: 10px; border-radius: 8px; margin: 15px 0; text-align: center; font-weight: 600; }
         .badge { display: inline-block; background: #e8f5e9; color: #2e7d32; padding: 5px 12px; border-radius: 20px; font-size: 0.85rem; margin-right: 5px; }
         footer { text-align: center; padding: 20px; opacity: 0.7; font-size: 0.9rem; }
         .hidden { display: none; }
@@ -353,7 +355,7 @@ HTML_TEMPLATE = """
                     <label>Amount (KES)</label>
                     <input type="number" name="amount" placeholder="50000" required>
                 </div>
-                <button type="submit" class="primary">Generate Invoice</button>
+                <button type="submit" class="primary">💰 Pay KES 50 & Generate</button>
             </form>
             <div id="invoiceResult" class="result hidden"></div>
         </div>
@@ -425,6 +427,17 @@ HTML_TEMPLATE = """
             const data = Object.fromEntries(formData);
             data.amount = parseFloat(data.amount);
             
+            // Show payment required notice
+            const confirmPay = confirm("Generate invoice for KES 50? (Demo mode - no actual payment)");
+            
+            if (!confirmPay) return;
+            
+            // Add demo fee
+            document.getElementById('invoiceResult').innerHTML = `
+                <div class="payment-notice">💳 Payment: KES 50 (Demo Mode)</div>
+            `;
+            document.getElementById('invoiceResult').classList.remove('hidden');
+            
             const response = await fetch('/api/invoice', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -433,18 +446,18 @@ HTML_TEMPLATE = """
             const result = await response.json();
             
             document.getElementById('invoiceResult').innerHTML = `
-                <h3>✅ Invoice Generated</h3>
+                <h3>✅ Invoice Generated (KES 50 Paid)</h3>
                 <div class="result-row"><span>Invoice Number</span><span>${result.invoice_number}</span></div>
                 <div class="result-row"><span>Date</span><span>${result.date}</span></div>
                 <div class="result-row"><span>Subtotal</span><span>KES ${result.subtotal.toLocaleString()}</span></div>
                 <div class="result-row"><span>VAT (16%)</span><span>KES ${result.vat.toLocaleString()}</span></div>
                 <div class="result-row"><span>Grand Total</span><span>KES ${result.total.toLocaleString()}</span></div>
+                <div class="payment-status">✓ KES 50 payment confirmed</div>
                 <div class="btn-row">
                 <button class="download-btn" onclick="downloadInvoice('${result.invoice_number}', '${result.download_text.replace(/'/g, "\\'")}')">📥 Download</button>
                 <button class="print-btn" onclick="window.print()">🖨️ Print / PDF</button>
                 </div>
             `;
-            document.getElementById('invoiceResult').classList.remove('hidden');
         });
         
         document.getElementById('payeForm').addEventListener('submit', async (e) => {
