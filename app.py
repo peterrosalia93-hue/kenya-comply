@@ -14,6 +14,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'kenyacomply-dev-secret-key')
 # Import our modules
 from etims_invoice import create_standard_invoice
 from tax_calculator import calculate_paye, calculate_vat
+from mpesa import initiate_mpesa_payment, verify_mpesa_payment, PAYMENT_CONFIG
 
 # In-memory user store (replace with Supabase in production)
 USERS = {}
@@ -355,7 +356,11 @@ HTML_TEMPLATE = """
                     <label>Amount (KES)</label>
                     <input type="number" name="amount" placeholder="50000" required>
                 </div>
-                <button type="submit" class="primary">💰 Pay KES 50 & Generate</button>
+                <div class="form-group">
+                    <label>📱 Phone (for M-Pesa)</label>
+                    <input type="tel" name="phone" placeholder="07XX XXX XXX" required>
+                </div>
+                <button type="submit" class="primary">💳 Pay KES 50 via M-Pesa</button>
             </form>
             <div id="invoiceResult" class="result hidden"></div>
         </div>
@@ -426,38 +431,60 @@ HTML_TEMPLATE = """
             const formData = new FormData(e.target);
             const data = Object.fromEntries(formData);
             data.amount = parseFloat(data.amount);
+            const phone = data.phone;
             
-            // Show payment required notice
-            const confirmPay = confirm("Generate invoice for KES 50? (Demo mode - no actual payment)");
+            // Check if phone provided
+            if (!phone || phone.length < 10) {
+                alert('Please enter your M-Pesa phone number');
+                return;
+            }
             
-            if (!confirmPay) return;
-            
-            // Add demo fee
+            // Show processing
             document.getElementById('invoiceResult').innerHTML = `
-                <div class="payment-notice">💳 Payment: KES 50 (Demo Mode)</div>
+                <div class="payment-notice">📱 Initiating M-Pesa payment...</div>
             `;
             document.getElementById('invoiceResult').classList.remove('hidden');
             
-            const response = await fetch('/api/invoice', {
+            // Initiate payment
+            const payResp = await fetch('/api/payment/initiate', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
+                body: JSON.stringify({phone: phone, amount: 50})
             });
-            const result = await response.json();
+            const payResult = await payResp.json();
             
-            document.getElementById('invoiceResult').innerHTML = `
-                <h3>✅ Invoice Generated (KES 50 Paid)</h3>
-                <div class="result-row"><span>Invoice Number</span><span>${result.invoice_number}</span></div>
-                <div class="result-row"><span>Date</span><span>${result.date}</span></div>
-                <div class="result-row"><span>Subtotal</span><span>KES ${result.subtotal.toLocaleString()}</span></div>
-                <div class="result-row"><span>VAT (16%)</span><span>KES ${result.vat.toLocaleString()}</span></div>
-                <div class="result-row"><span>Grand Total</span><span>KES ${result.total.toLocaleString()}</span></div>
-                <div class="payment-status">✓ KES 50 payment confirmed</div>
-                <div class="btn-row">
-                <button class="download-btn" onclick="downloadInvoice('${result.invoice_number}', '${result.download_text.replace(/'/g, "\\'")}')">📥 Download</button>
-                <button class="print-btn" onclick="window.print()">🖨️ Print / PDF</button>
-                </div>
-            `;
+            if (payResult.status === 'success') {
+                // Payment successful (demo mode)
+                document.getElementById('invoiceResult').innerHTML = `
+                    <div class="payment-status">✅ Payment initiated! Check your phone for M-Pesa prompt.</div>
+                `;
+                
+                // Generate invoice
+                const response = await fetch('/api/invoice', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+                
+                document.getElementById('invoiceResult').innerHTML = `
+                    <h3>✅ Invoice Generated</h3>
+                    <div class="result-row"><span>Invoice Number</span><span>${result.invoice_number}</span></div>
+                    <div class="result-row"><span>Date</span><span>${result.date}</span></div>
+                    <div class="result-row"><span>Subtotal</span><span>KES ${result.subtotal.toLocaleString()}</span></div>
+                    <div class="result-row"><span>VAT (16%)</span><span>KES ${result.vat.toLocaleString()}</span></div>
+                    <div class="result-row"><span>Grand Total</span><span>KES ${result.total.toLocaleString()}</span></div>
+                    <div class="payment-status">✓ KES 50 paid via M-Pesa</div>
+                    <div class="btn-row">
+                    <button class="download-btn" onclick="downloadInvoice('${result.invoice_number}', '${result.download_text.replace(/'/g, "\\'")}')">📥 Download</button>
+                    <button class="print-btn" onclick="window.print()">🖨️ Print / PDF</button>
+                    </div>
+                `;
+            } else {
+                document.getElementById('invoiceResult').innerHTML = `
+                    <div class="payment-notice">❌ Payment failed: ${payResult.message}</div>
+                `;
+            }
         });
         
         document.getElementById('payeForm').addEventListener('submit', async (e) => {
@@ -522,6 +549,22 @@ HTML_TEMPLATE = """
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route("/api/payment/initiate", methods=["POST"])
+def api_payment_initiate():
+    """Initiate M-Pesa payment"""
+    data = request.json
+    phone = data.get('phone', '')
+    amount = data.get('amount', PAYMENT_CONFIG['fee'])
+    
+    result = initiate_mpesa_payment(phone, amount)
+    return jsonify(result)
+
+@app.route("/api/payment/verify/<tx_ref>", methods=["GET"])
+def api_payment_verify(tx_ref):
+    """Verify payment status"""
+    result = verify_mpesa_payment(tx_ref)
+    return jsonify(result)
 
 @app.route("/api/invoice", methods=["POST"])
 def api_invoice():
