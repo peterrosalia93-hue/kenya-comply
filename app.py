@@ -2,17 +2,187 @@
 # Flask app for Kenyan Business Compliance
 # Deployable to Vercel
 
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 import json
+import os
+import uuid
 from datetime import datetime
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'kenyacomply-dev-secret-key')
 
 # Import our modules
 from etims_invoice import create_standard_invoice
 from tax_calculator import calculate_paye, calculate_vat
 
-# HTML Template
+# In-memory user store (replace with Supabase in production)
+USERS = {}
+
+# ============================================
+# AUTH ROUTES
+# ============================================
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page"""
+    if request.method == 'POST':
+        email = request.form.get('email', '')
+        name = request.form.get('name', '')
+        if email:
+            if email not in USERS:
+                USERS[email] = {'id': str(uuid.uuid4()), 'email': email, 'name': name, 'invoices': []}
+            session['user_id'] = USERS[email]['id']
+            session['email'] = email
+            return redirect(url_for('dashboard'))
+    return render_template_string(LOGIN_HTML)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
+
+@app.route('/dashboard')
+def dashboard():
+    """User dashboard"""
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    
+    user = next((u for u in USERS.values() if u['id'] == session['user_id']), None)
+    invoices = user['invoices'] if user else []
+    
+    return render_template_string(DASHBOARD_HTML, user=user, invoices=invoices)
+
+# ============================================
+# HTML TEMPLATES
+# ============================================
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - KenyaComply</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 100%; max-width: 400px; }
+        h1 { color: #1a1a2e; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #666; text-align: center; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; }
+        input { width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; }
+        input:focus { outline: none; border-color: #1a1a2e; }
+        button { background: #1a1a2e; color: white; padding: 16px; border: none; border-radius: 8px; font-size: 1rem; width: 100%; cursor: pointer; font-weight: 600; }
+        button:hover { background: #16213e; }
+        .back { display: block; text-align: center; margin-top: 20px; color: #666; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🏢 KenyaComply</h1>
+        <p class="subtitle">Sign in to manage your business</p>
+        <form method="POST">
+            <div class="form-group">
+                <label>Email</label>
+                <input type="email" name="email" required placeholder="you@company.co.ke">
+            </div>
+            <div class="form-group">
+                <label>Your Name</label>
+                <input type="text" name="name" required placeholder="John Doe">
+            </div>
+            <button type="submit">Continue</button>
+        </form>
+        <a href="/" class="back">← Back to home</a>
+    </div>
+</body>
+</html>
+"""
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - KenyaComply</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; }
+        header { background: #1a1a2e; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .logo { font-size: 1.5rem; font-weight: bold; }
+        .container { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+        .card { background: white; padding: 25px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h2 { color: #1a1a2e; margin: 0 0 20px 0; }
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+        .stat { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #1a1a2e; }
+        .stat-label { color: #666; font-size: 0.9rem; }
+        .invoice { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #1a1a2e; }
+        .invoice-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
+        .invoice-number { font-weight: bold; color: #1a1a2e; }
+        .invoice-amount { font-size: 1.2rem; font-weight: bold; color: #2e7d32; }
+        .invoice-date { color: #666; font-size: 0.9rem; }
+        .btn { display: inline-block; background: #1a1a2e; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; }
+        .btn:hover { background: #16213e; }
+        .btn-outline { background: transparent; border: 2px solid #1a1a2e; color: #1a1a2e; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">🏢 KenyaComply</div>
+        <a href="/logout" style="color: white; text-decoration: none;">Logout</a>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>Welcome back, {{ user.name }} 👋</h2>
+            <p style="color: #666;">Manage your business compliance from one place.</p>
+            <a href="/" class="btn">+ Create New Invoice</a>
+        </div>
+        
+        <div class="card">
+            <h2>Your Stats</h2>
+            <div class="stat-grid">
+                <div class="stat">
+                    <div class="stat-value">{{ invoices|length }}</div>
+                    <div class="stat-label">Invoices Created</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">KES {{ "{:,.0f}".format(invoices|sum(attribute='amount')) if invoices else 0 }}</div>
+                    <div class="stat-label">Total Billed</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Recent Invoices</h2>
+            {% if invoices %}
+                {% for inv in invoices|reverse %}
+                    <div class="invoice">
+                        <div class="invoice-header">
+                            <span class="invoice-number">{{ inv.number }}</span>
+                            <span class="invoice-amount">KES {{ "{:,.0f}".format(inv.amount) }}</span>
+                        </div>
+                        <div class="invoice-date">{{ inv.buyer }} • {{ inv.date }}</div>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p style="color: #666;">No invoices yet. Create your first one!</p>
+            {% endif %}
+        </div>
+        
+        <div class="card">
+            <h2>Quick Actions</h2>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <a href="/" class="btn">📄 New Invoice</a>
+                <a href="/" class="btn btn-outline">💰 PAYE Calculator</a>
+                <a href="/" class="btn btn-outline">🧾 VAT Calculator</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# Main HTML Template
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -27,6 +197,9 @@ HTML_TEMPLATE = """
         header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; padding: 40px 20px; text-align: center; border-radius: 10px; margin-bottom: 30px; }
         h1 { font-size: 2.5rem; margin-bottom: 10px; }
         .subtitle { opacity: 0.8; font-size: 1.1rem; }
+        .nav { display: flex; justify-content: center; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
+        .nav-link { color: white; text-decoration: none; padding: 8px 16px; border-radius: 20px; background: rgba(255,255,255,0.1); }
+        .nav-link:hover { background: rgba(255,255,255,0.2); }
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
         .tab { padding: 12px 24px; background: white; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; transition: all 0.3s; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
         .tab:hover { transform: translateY(-2px); }
@@ -59,6 +232,10 @@ HTML_TEMPLATE = """
                 <span class="badge">ETIMS Invoices</span>
                 <span class="badge">Tax Calculator</span>
                 <span class="badge">KRA Compliant</span>
+            </div>
+            <div class="nav" style="margin-top: 20px;">
+                <a href="/login" class="nav-link">Login</a>
+                <a href="/dashboard" class="nav-link">Dashboard</a>
             </div>
         </header>
         
@@ -138,7 +315,7 @@ HTML_TEMPLATE = """
         </div>
         
         <footer>
-            <p>Built by Mwakulomba 🎥📜 | KenyaComply v1.0</p>
+            <p>Built by Mwakulomba 🎥📜 | KenyaComply v1.1</p>
         </footer>
     </div>
     
@@ -150,7 +327,6 @@ HTML_TEMPLATE = """
             event.target.classList.add('active');
         }
         
-        // Invoice Form
         document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const formData = new FormData(e.target);
@@ -175,7 +351,6 @@ HTML_TEMPLATE = """
             document.getElementById('invoiceResult').classList.remove('hidden');
         });
         
-        // PAYE Form
         document.getElementById('payeForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const formData = new FormData(e.target);
@@ -200,7 +375,6 @@ HTML_TEMPLATE = """
             document.getElementById('payeResult').classList.remove('hidden');
         });
         
-        // VAT Form
         document.getElementById('vatForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const formData = new FormData(e.target);
@@ -232,8 +406,12 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ============================================
+# API ROUTES
+# ============================================
+
 @app.route("/")
-def home():
+def index():
     return render_template_string(HTML_TEMPLATE)
 
 @app.route("/api/invoice", methods=["POST"])
@@ -249,6 +427,19 @@ def api_invoice():
         buyer_address="Kenya",
         items=[{"description": "Service", "quantity": 1, "unit_price": data["amount"], "vat_rate": 16}]
     )
+    
+    # Save to user if logged in
+    if 'user_id' in session:
+        user = next((u for u in USERS.values() if u['id'] == session['user_id']), None)
+        if user:
+            user['invoices'].append({
+                'number': invoice.invoice_number,
+                'amount': invoice.grand_total,
+                'buyer': data["buyer_name"],
+                'date': invoice.date,
+                'seller': data["seller_name"]
+            })
+    
     return jsonify({
         "invoice_number": invoice.invoice_number,
         "date": invoice.date,
@@ -279,7 +470,7 @@ def api_vat():
 def health():
     return {"status": "ok", "service": "kenya-comply"}
 
-# Vercel handler
+# Run the app
 app.debug = True
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
