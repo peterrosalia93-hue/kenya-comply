@@ -488,11 +488,19 @@ def ask_tax_advisor(question, user_context=None):
                 text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if text:
                     return {"status": "success", "answer": text, "source": "ai"}
-        except Exception:
-            pass  # Fall through to rule-based
+            # Non-200: include debug info in fallback
+            fallback = rule_based_answer(question)
+            fallback["ai_debug"] = f"DeepSeek returned {resp.status_code}: {resp.text[:200]}"
+            return fallback
+        except Exception as e:
+            fallback = rule_based_answer(question)
+            fallback["ai_debug"] = f"DeepSeek error: {str(e)}"
+            return fallback
 
-    # Rule-based fallback
-    return rule_based_answer(question)
+    # Rule-based fallback (no API key configured)
+    fallback = rule_based_answer(question)
+    fallback["ai_debug"] = f"key_set={bool(DEEPSEEK_API_KEY)}, requests={bool(http_requests)}"
+    return fallback
 
 
 def rule_based_answer(question):
