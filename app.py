@@ -1549,7 +1549,17 @@ def settings_page():
 def api_settings():
     user = get_current_user()
     if not user:
+        if request.is_json:
+            return jsonify({"error": "Not logged in"}), 401
         return redirect('/login')
+    if request.is_json:
+        data = request.json
+        update_user(user['id'], {
+            'name': data.get('name', user['name']),
+            'kra_pin': data.get('kra_pin', '').strip().upper(),
+            'phone': data.get('phone', '').strip()
+        })
+        return jsonify({"status": "success"})
     update_user(user['id'], {
         'name': request.form.get('name', user['name']),
         'kra_pin': request.form.get('kra_pin', '').strip().upper(),

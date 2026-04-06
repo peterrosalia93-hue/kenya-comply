@@ -149,6 +149,8 @@ def calculate_paye(gross_salary: float) -> PAYEResult:
 
 def calculate_nhif(gross: float) -> float:
     """Calculate NHIF contribution based on gross salary"""
+    if gross <= 0:
+        return 0
     for threshold, contribution in NHIF_RATES:
         if gross <= threshold:
             return contribution
