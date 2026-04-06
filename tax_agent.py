@@ -9,8 +9,8 @@ from tax_calculator import (
     calculate_turnover_tax, calculate_withholding_tax
 )
 
-# Optional: Claude API for natural language tax advice
-CLAUDE_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+# Optional: OpenAI API for natural language tax advice
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 try:
     import requests as http_requests
@@ -426,7 +426,7 @@ def generate_filing_csv(return_type, return_data):
 
 
 # ============================================
-# AI TAX ADVISOR (Claude API)
+# AI TAX ADVISOR (OpenAI API)
 # ============================================
 SYSTEM_PROMPT = """You are KenyaComply Tax Advisor, an AI assistant specializing in Kenyan tax law and KRA compliance.
 
@@ -457,38 +457,38 @@ Be concise but thorough. If unsure about a specific regulation, say so.
 def ask_tax_advisor(question, user_context=None):
     """
     Ask the AI tax advisor a question.
-    Uses Claude API if available, otherwise falls back to rule-based answers.
+    Uses OpenAI API if available, otherwise falls back to rule-based answers.
     """
-    # Try Claude API first
-    if CLAUDE_API_KEY and http_requests:
+    # Try OpenAI API first
+    if OPENAI_API_KEY and http_requests:
         try:
-            messages = [{"role": "user", "content": question}]
+            user_message = question
             if user_context:
-                context = f"User context: {json.dumps(user_context)}\n\nQuestion: {question}"
-                messages = [{"role": "user", "content": context}]
+                user_message = f"User context: {json.dumps(user_context)}\n\nQuestion: {question}"
 
             resp = http_requests.post(
-                "https://api.anthropic.com/v1/messages",
+                "https://api.openai.com/v1/chat/completions",
                 headers={
-                    "x-api-key": CLAUDE_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "gpt-4o-mini",
                     "max_tokens": 1024,
-                    "system": SYSTEM_PROMPT,
-                    "messages": messages
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message}
+                    ]
                 },
                 timeout=30
             )
 
             if resp.status_code == 200:
                 result = resp.json()
-                text = result.get("content", [{}])[0].get("text", "")
+                text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if text:
                     return {"status": "success", "answer": text, "source": "ai"}
-        except Exception as e:
+        except Exception:
             pass  # Fall through to rule-based
 
     # Rule-based fallback
