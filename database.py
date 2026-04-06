@@ -252,6 +252,11 @@ def save_expense(user_id, expense_data):
         'supplier': expense_data.get('supplier', ''),
         'supplier_pin': expense_data.get('supplier_pin', ''),
         'receipt_ref': expense_data.get('receipt_ref', ''),
+        'payment_method': expense_data.get('payment_method', 'cash'),
+        'card_last4': expense_data.get('card_last4', ''),
+        'card_bank': expense_data.get('card_bank', ''),
+        'mpesa_ref': expense_data.get('mpesa_ref', ''),
+        'import_source': expense_data.get('import_source', 'manual'),
         'date': expense_data.get('date', _now()[:10]),
         'created_at': _now()
     }
@@ -284,6 +289,14 @@ def get_expense_summary(user_id, business_id=None):
         cat = e.get('category', 'general')
         by_category[cat] = by_category.get(cat, 0) + e.get('amount', 0)
     return {'total': total, 'total_vat': total_vat, 'by_category': by_category, 'count': len(expenses)}
+
+def save_expenses_bulk(user_id, expenses_list):
+    """Save multiple expenses at once (for CSV/M-Pesa import)."""
+    saved = []
+    for exp_data in expenses_list:
+        saved.append(save_expense(user_id, exp_data))
+    return saved
+
 
 # ============================================
 # EMPLOYEES (Payroll)

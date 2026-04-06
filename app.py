@@ -32,7 +32,7 @@ from database import (
     save_invoice, get_invoices, get_invoice,
     save_payment, get_payments, update_payment,
     save_tax_return, get_tax_returns,
-    save_expense, get_expenses, get_expense_summary,
+    save_expense, save_expenses_bulk, get_expenses, get_expense_summary,
     save_employee, get_employees, update_employee, delete_employee,
     save_payroll_run, get_payroll_runs,
     get_profit_loss, DEMO_MODE as DB_DEMO_MODE
@@ -829,9 +829,36 @@ def expenses_page():
     return render_template_string("""
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Expenses - KenyaComply</title>
-<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<style>""" + BASE_CSS + """
+.import-zone { border:2px dashed #ccc; border-radius:12px; padding:30px; text-align:center; cursor:pointer; transition:all 0.2s; background:#fafafa; }
+.import-zone:hover, .import-zone.dragover { border-color:#007bff; background:#f0f7ff; }
+.import-zone input[type=file] { display:none; }
+.preview-table { width:100%; border-collapse:collapse; margin:12px 0; font-size:13px; }
+.preview-table th { background:#f0f0f0; padding:8px; text-align:left; border-bottom:2px solid #ddd; }
+.preview-table td { padding:6px 8px; border-bottom:1px solid #eee; }
+.preview-table tr:hover { background:#f8f9fa; }
+.payment-badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; }
+.payment-badge.cash { background:#e8e8e8; color:#555; }
+.payment-badge.mpesa { background:#4caf50; color:#fff; }
+.payment-badge.card { background:#2196f3; color:#fff; }
+.payment-badge.bank { background:#ff9800; color:#fff; }
+.import-count { font-size:28px; font-weight:700; color:#28a745; }
+.mpesa-msg { background:#f8f9fa; padding:10px; border-radius:8px; margin-bottom:6px; font-family:monospace; font-size:12px; white-space:pre-wrap; }
+</style></head><body>
+""" + NAVBAR_HTML + """
 <div class="container">
-<h1 style="margin-bottom:20px;">Expense Tracker</h1>
+<h1 style="margin-bottom:5px;">Expense Tracker</h1>
+<p style="color:#666;margin-bottom:20px;">Track expenses manually, import bank statements, or paste M-Pesa messages</p>
+
+<div class="tabs">
+    <button class="tab active" onclick="showTab('tabManual',event)">Add Expense</button>
+    <button class="tab" onclick="showTab('tabCSV',event)">Import Bank CSV</button>
+    <button class="tab" onclick="showTab('tabMpesa',event)">M-Pesa Import</button>
+    <button class="tab" onclick="showTab('tabList',event)">Expenses</button>
+</div>
+
+<!-- Manual Entry -->
+<div id="tabManual" class="tab-content">
 <div class="card">
     <h2>Add Expense</h2>
     <form id="expenseForm">
@@ -843,24 +870,135 @@ def expenses_page():
             <option value="salaries">Salaries</option><option value="marketing">Marketing</option>
             <option value="professional">Professional Fees</option><option value="equipment">Equipment</option>
             <option value="materials">Raw Materials</option><option value="insurance">Insurance</option>
-            <option value="general">General</option>
+            <option value="food">Food & Meals</option><option value="fuel">Fuel</option>
+            <option value="airtime">Airtime & Data</option><option value="general">General</option>
         </select></div>
     </div>
     <div class="row">
-        <div class="col form-group"><label>Amount (KES)</label><input type="number" name="amount" required placeholder="5000" min="0"></div>
-        <div class="col form-group"><label>VAT Amount (KES)</label><input type="number" name="vat_amount" value="0" min="0"></div>
+        <div class="col form-group"><label>Amount (KES)</label><input type="number" name="amount" required placeholder="5000" min="0" step="0.01"></div>
+        <div class="col form-group"><label>VAT Amount (KES)</label><input type="number" name="vat_amount" value="0" min="0" step="0.01"></div>
     </div>
     <div class="row">
         <div class="col form-group"><label>Supplier</label><input type="text" name="supplier" placeholder="Supplier name"></div>
         <div class="col form-group"><label>Supplier KRA PIN</label><input type="text" name="supplier_pin" placeholder="For VAT offset"></div>
     </div>
-    <div class="form-group"><label>Date</label><input type="date" name="date" value=\"""" + datetime.now().strftime('%Y-%m-%d') + """"></div>
+    <div class="row">
+        <div class="col form-group"><label>Payment Method</label><select name="payment_method" id="payMethod" onchange="toggleCardFields()">
+            <option value="cash">Cash</option>
+            <option value="mpesa">M-Pesa</option>
+            <option value="card">Debit/Credit Card</option>
+            <option value="bank">Bank Transfer</option>
+        </select></div>
+        <div class="col form-group"><label>Date</label><input type="date" name="date" value=\"""" + datetime.now().strftime('%Y-%m-%d') + """"></div>
+    </div>
+    <div id="cardFields" class="hidden">
+        <div class="row">
+            <div class="col form-group"><label>Card Last 4 Digits</label><input type="text" name="card_last4" maxlength="4" placeholder="1234"></div>
+            <div class="col form-group"><label>Bank</label><select name="card_bank">
+                <option value="">Select Bank</option>
+                <option value="equity">Equity Bank</option><option value="kcb">KCB</option>
+                <option value="coop">Co-operative Bank</option><option value="stanbic">Stanbic</option>
+                <option value="ncba">NCBA</option><option value="dtb">DTB</option>
+                <option value="absa">Absa Kenya</option><option value="standard_chartered">Standard Chartered</option>
+                <option value="im_bank">I&M Bank</option><option value="family">Family Bank</option>
+                <option value="other">Other</option>
+            </select></div>
+        </div>
+    </div>
+    <div id="mpesaRefField" class="hidden">
+        <div class="form-group"><label>M-Pesa Reference</label><input type="text" name="mpesa_ref" placeholder="e.g. SJ12ABC456"></div>
+    </div>
     <button type="submit" class="btn btn-primary btn-full">Save Expense</button>
     </form>
     <div id="expenseResult" class="result hidden"></div>
 </div>
+</div>
+
+<!-- Bank CSV Import -->
+<div id="tabCSV" class="tab-content hidden">
+<div class="card">
+    <h2>Import Bank/Card Statement</h2>
+    <p style="color:#666;margin-bottom:16px;">Upload a CSV file from your bank (Equity, KCB, Stanbic, NCBA, Co-op, etc.) or card statement. We'll auto-detect columns and import transactions as expenses.</p>
+    <div class="form-group"><label>Bank / Source</label><select id="csvBank">
+        <option value="auto">Auto-Detect</option>
+        <option value="equity">Equity Bank</option><option value="kcb">KCB</option>
+        <option value="coop">Co-operative Bank</option><option value="stanbic">Stanbic</option>
+        <option value="ncba">NCBA</option><option value="absa">Absa Kenya</option>
+        <option value="standard_chartered">Standard Chartered</option>
+        <option value="generic_card">Credit/Debit Card Statement</option>
+    </select></div>
+    <div class="import-zone" id="csvDropZone" onclick="document.getElementById('csvFile').click()">
+        <div style="font-size:36px;margin-bottom:8px;">&#128196;</div>
+        <strong>Drop CSV file here or click to browse</strong>
+        <p style="color:#999;font-size:13px;margin-top:6px;">Supports .csv files from any Kenyan bank</p>
+        <input type="file" id="csvFile" accept=".csv,.txt">
+    </div>
+    <div id="csvPreview" class="hidden" style="margin-top:16px;">
+        <h3>Preview <span id="csvCount" style="color:#28a745;"></span></h3>
+        <div style="overflow-x:auto;"><table class="preview-table" id="csvTable"></table></div>
+        <div class="row" style="margin-top:12px;">
+            <div class="col"><button class="btn btn-green btn-full" onclick="importCSV()">Import All Expenses</button></div>
+            <div class="col"><button class="btn btn-outline btn-full" onclick="clearCSV()">Cancel</button></div>
+        </div>
+    </div>
+    <div id="csvResult" class="hidden"></div>
+</div>
+<div class="card">
+    <h3>Expected CSV Format</h3>
+    <p style="color:#666;font-size:13px;">Most bank CSVs work automatically. If auto-detect fails, ensure your CSV has these columns:</p>
+    <table class="preview-table">
+        <tr><th>Date</th><th>Description</th><th>Amount</th><th>Type (optional)</th></tr>
+        <tr><td>2026-04-01</td><td>NAIVAS SUPERMARKET</td><td>3,500.00</td><td>DEBIT</td></tr>
+        <tr><td>2026-04-02</td><td>UBER TRIP</td><td>850.00</td><td>DEBIT</td></tr>
+    </table>
+</div>
+</div>
+
+<!-- M-Pesa Import -->
+<div id="tabMpesa" class="tab-content hidden">
+<div class="card">
+    <h2>Import M-Pesa Transactions</h2>
+    <p style="color:#666;margin-bottom:16px;">Paste your M-Pesa confirmation messages below. We'll extract the amount, recipient, date, and reference automatically.</p>
+    <div class="form-group">
+        <label>Paste M-Pesa Messages (one per line or separated by blank lines)</label>
+        <textarea id="mpesaText" rows="8" placeholder="SJ12ABC456 Confirmed. Ksh3,500.00 sent to NAIVAS SUPERMARKET 0712345678 on 5/4/26 at 2:30 PM. New M-PESA balance is Ksh12,350.00.
+
+RK98DEF789 Confirmed. Ksh850.00 paid to UBER BV. on 5/4/26 at 3:15 PM.Transaction cost, Ksh0.00. New M-PESA balance is Ksh11,500.00." style="font-family:monospace;font-size:13px;"></textarea>
+    </div>
+    <button class="btn btn-green btn-full" onclick="parseMpesa()">Parse M-Pesa Messages</button>
+    <div id="mpesaPreview" class="hidden" style="margin-top:16px;">
+        <h3>Parsed Transactions <span id="mpesaCount" style="color:#28a745;"></span></h3>
+        <div id="mpesaParsed"></div>
+        <div class="row" style="margin-top:12px;">
+            <div class="col"><button class="btn btn-green btn-full" onclick="importMpesa()">Import All as Expenses</button></div>
+            <div class="col"><button class="btn btn-outline btn-full" onclick="clearMpesa()">Cancel</button></div>
+        </div>
+    </div>
+    <div id="mpesaResult" class="hidden"></div>
+</div>
+<div class="card">
+    <h3>How to Get M-Pesa Messages</h3>
+    <div style="color:#666;font-size:14px;">
+        <p><strong>Option 1:</strong> Open your SMS app, search for "MPESA", copy and paste the messages.</p>
+        <p style="margin-top:8px;"><strong>Option 2:</strong> Dial *334# on Safaricom &rarr; My Account &rarr; M-Pesa Statement &rarr; get PDF via email, then copy the transactions.</p>
+        <p style="margin-top:8px;"><strong>Supported formats:</strong> "sent to", "paid to", "Buy Goods", "Paybill", "Withdraw"</p>
+    </div>
+</div>
+</div>
+
+<!-- Expense List -->
+<div id="tabList" class="tab-content hidden">
 <div class="card">
     <h2>Recent Expenses</h2>
+    <div class="row" style="margin-bottom:12px;">
+        <div class="col form-group"><label>Filter by Payment</label><select id="filterPay" onchange="loadExpenses()">
+            <option value="">All</option><option value="cash">Cash</option><option value="mpesa">M-Pesa</option>
+            <option value="card">Card</option><option value="bank">Bank</option>
+        </select></div>
+        <div class="col form-group"><label>Filter by Source</label><select id="filterSource" onchange="loadExpenses()">
+            <option value="">All</option><option value="manual">Manual</option><option value="csv_import">Bank CSV</option><option value="mpesa_import">M-Pesa Import</option>
+        </select></div>
+    </div>
     <div id="expenseList"><p style="color:#666;">Loading...</p></div>
 </div>
 <div class="card">
@@ -868,35 +1006,282 @@ def expenses_page():
     <div id="expenseSummary"></div>
 </div>
 </div>
-""" + FOOTER_HTML + """
+</div>
+
 <script>""" + BASE_JS + """
-async function loadExpenses() {
-    const r = await (await fetch('/api/expenses')).json();
-    const list = document.getElementById('expenseList');
-    if (!r.expenses || !r.expenses.length) { list.innerHTML='<p style="color:#666;">No expenses yet</p>'; return; }
-    list.innerHTML = r.expenses.map(e => '<div class="list-item" style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:8px;display:flex;justify-content:space-between;flex-wrap:wrap;">'+
-        '<div><strong>'+e.description+'</strong> | '+e.category+' | '+(e.date||'')+'</div>'+
-        '<div><span class="badge badge-blue">'+fmt(e.amount)+'</span>'+(e.vat_amount>0?' <span class="badge badge-green">VAT: '+fmt(e.vat_amount)+'</span>':'')+'</div></div>'
-    ).join('');
-    const s = r.summary;
-    document.getElementById('expenseSummary').innerHTML =
-        '<div class="stat-grid"><div class="stat"><div class="stat-value">'+s.count+'</div><div class="stat-label">Expenses</div></div>'+
-        '<div class="stat"><div class="stat-value">'+fmt(s.total)+'</div><div class="stat-label">Total Spent</div></div>'+
-        '<div class="stat"><div class="stat-value">'+fmt(s.total_vat)+'</div><div class="stat-label">Input VAT</div></div></div>';
+function showTab(id, e) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(id).classList.remove('hidden');
+    if(e) e.target.classList.add('active');
+    if(id === 'tabList') loadExpenses();
 }
+
+function toggleCardFields() {
+    const m = document.getElementById('payMethod').value;
+    document.getElementById('cardFields').classList.toggle('hidden', m !== 'card');
+    document.getElementById('mpesaRefField').classList.toggle('hidden', m !== 'mpesa');
+}
+
+// ---- Manual entry ----
 document.getElementById('expenseForm').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const data = Object.fromEntries(fd);
     data.amount = parseFloat(data.amount)||0;
     data.vat_amount = parseFloat(data.vat_amount)||0;
+    data.import_source = 'manual';
     const r = await (await fetch('/api/expenses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();
     document.getElementById('expenseResult').innerHTML = '<div class="alert alert-success">Expense saved!</div>';
     document.getElementById('expenseResult').classList.remove('hidden');
-    e.target.reset(); loadExpenses();
+    e.target.reset(); toggleCardFields();
 });
+
+// ---- CSV Import ----
+let csvRows = [];
+const csvZone = document.getElementById('csvDropZone');
+csvZone.addEventListener('dragover', e => { e.preventDefault(); csvZone.classList.add('dragover'); });
+csvZone.addEventListener('dragleave', () => csvZone.classList.remove('dragover'));
+csvZone.addEventListener('drop', e => { e.preventDefault(); csvZone.classList.remove('dragover'); handleCSVFile(e.dataTransfer.files[0]); });
+document.getElementById('csvFile').addEventListener('change', e => { if(e.target.files[0]) handleCSVFile(e.target.files[0]); });
+
+function handleCSVFile(file) {
+    const reader = new FileReader();
+    reader.onload = e => parseCSV(e.target.result);
+    reader.readAsText(file);
+}
+
+function parseCSV(text) {
+    const lines = text.trim().split('\\n').map(l => l.trim()).filter(l => l);
+    if(lines.length < 2) { alert('CSV file is empty or has no data rows'); return; }
+
+    // Parse header
+    const sep = lines[0].includes('\\t') ? '\\t' : ',';
+    const headers = lines[0].split(sep).map(h => h.replace(/"/g,'').trim().toLowerCase());
+
+    // Auto-detect columns
+    const dateCol = headers.findIndex(h => /date|time|posted|trans.*date|value.*date/.test(h));
+    const descCol = headers.findIndex(h => /desc|narr|particular|detail|merchant|payee|reference/.test(h));
+    const amtCol = headers.findIndex(h => /amount|debit|withdrawal|paid|money.*out|dr/.test(h));
+    const typeCol = headers.findIndex(h => /type|dr.*cr|transaction.*type/.test(h));
+
+    if(dateCol === -1 && descCol === -1 && amtCol === -1) {
+        // Try treating as: date, description, amount
+        if(headers.length >= 3) {
+            parseCSVRows(lines.slice(1), sep, 0, 1, 2, -1);
+            return;
+        }
+        alert('Could not detect columns. Ensure CSV has Date, Description, Amount columns.'); return;
+    }
+
+    parseCSVRows(lines.slice(1), sep, dateCol, descCol, amtCol, typeCol);
+}
+
+function parseCSVRows(lines, sep, dateIdx, descIdx, amtIdx, typeIdx) {
+    csvRows = [];
+    const bank = document.getElementById('csvBank').value;
+    for(const line of lines) {
+        const cols = line.split(sep).map(c => c.replace(/"/g,'').trim());
+        if(cols.length < 3) continue;
+
+        let amt = (cols[amtIdx]||'0').replace(/[^0-9.-]/g,'');
+        amt = parseFloat(amt) || 0;
+        if(amt <= 0) continue; // skip credits/zero
+
+        // Skip if type column says CREDIT
+        if(typeIdx >= 0) {
+            const t = (cols[typeIdx]||'').toUpperCase();
+            if(t === 'CREDIT' || t === 'CR') continue;
+        }
+
+        const desc = cols[descIdx] || 'Bank transaction';
+        const dateStr = cols[dateIdx] || '';
+        const cat = autoCategory(desc);
+
+        csvRows.push({
+            date: normalizeDate(dateStr),
+            description: desc,
+            amount: amt,
+            category: cat,
+            payment_method: bank === 'generic_card' ? 'card' : 'bank',
+            card_bank: bank !== 'auto' && bank !== 'generic_card' ? bank : '',
+            import_source: 'csv_import',
+            vat_amount: 0
+        });
+    }
+
+    if(!csvRows.length) { alert('No debit transactions found in CSV'); return; }
+
+    // Show preview
+    document.getElementById('csvCount').textContent = '(' + csvRows.length + ' transactions)';
+    let html = '<tr><th>Date</th><th>Description</th><th>Category</th><th>Amount</th></tr>';
+    csvRows.forEach(r => {
+        html += '<tr><td>'+r.date+'</td><td>'+r.description+'</td><td>'+r.category+'</td><td style="text-align:right;">KES '+Number(r.amount).toLocaleString()+'</td></tr>';
+    });
+    document.getElementById('csvTable').innerHTML = html;
+    document.getElementById('csvPreview').classList.remove('hidden');
+}
+
+function normalizeDate(d) {
+    if(!d) return new Date().toISOString().slice(0,10);
+    // Try various formats
+    const parts = d.match(/(\\d{1,4})[\\/-](\\d{1,2})[\\/-](\\d{1,4})/);
+    if(parts) {
+        let [,a,b,c] = parts;
+        if(a.length === 4) return a+'-'+b.padStart(2,'0')+'-'+c.padStart(2,'0');
+        if(c.length === 4) return c+'-'+b.padStart(2,'0')+'-'+a.padStart(2,'0');
+        if(parseInt(c) < 100) c = '20'+c;
+        return c+'-'+b.padStart(2,'0')+'-'+a.padStart(2,'0');
+    }
+    return new Date().toISOString().slice(0,10);
+}
+
+function autoCategory(desc) {
+    const d = desc.toUpperCase();
+    if(/UBER|BOLT|TAXI|BUS|MATATU|SGR|KENYA AIRWAYS|FLY/.test(d)) return 'transport';
+    if(/FUEL|SHELL|TOTAL|RUBIS|PETROL|DIESEL/.test(d)) return 'fuel';
+    if(/NAIVAS|CARREFOUR|QUICKMART|TUSKYS|CHANDARANA|FOOD|RESTAURANT|CAFE|JAVA|KFC|CHICKEN/.test(d)) return 'food';
+    if(/SAFARICOM|AIRTEL|TELKOM|AIRTIME|DATA|BUNDLE/.test(d)) return 'airtime';
+    if(/KPLC|KENYA POWER|WATER|NAIROBI.*WATER|ELECTRICITY/.test(d)) return 'utilities';
+    if(/RENT|LANDLORD/.test(d)) return 'rent';
+    if(/INSURANCE|NHIF|BRITAM|JUBILEE|UAP/.test(d)) return 'insurance';
+    if(/MARKETING|GOOGLE.*ADS|FACEBOOK|META|ADVERT/.test(d)) return 'marketing';
+    if(/JUMIA|KILIMALL|OFFICE|STATIONERY/.test(d)) return 'office';
+    return 'general';
+}
+
+async function importCSV() {
+    if(!csvRows.length) return;
+    const r = await (await fetch('/api/expenses/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expenses:csvRows})})).json();
+    document.getElementById('csvResult').innerHTML = '<div class="alert alert-success"><span class="import-count">'+r.imported+'</span> expenses imported from bank statement!</div>';
+    document.getElementById('csvResult').classList.remove('hidden');
+    document.getElementById('csvPreview').classList.add('hidden');
+    csvRows = [];
+}
+
+function clearCSV() { csvRows = []; document.getElementById('csvPreview').classList.add('hidden'); }
+
+// ---- M-Pesa Import ----
+let mpesaRows = [];
+
+function parseMpesa() {
+    const text = document.getElementById('mpesaText').value.trim();
+    if(!text) { alert('Paste M-Pesa messages first'); return; }
+
+    mpesaRows = [];
+    // Split by transaction code pattern (2 uppercase letters followed by alphanumeric)
+    const msgs = text.split(/(?=\\b[A-Z]{2,3}[A-Z0-9]{7,10}\\s+Confirmed)/i);
+
+    for(const msg of msgs) {
+        const m = msg.trim();
+        if(!m) continue;
+
+        // Extract reference code
+        const refMatch = m.match(/^([A-Z0-9]{8,13})\s+Confirmed/i);
+        if(!refMatch) continue;
+        const ref = refMatch[1];
+
+        // Extract amount
+        const amtMatch = m.match(/Ksh([0-9,.]+)/i);
+        if(!amtMatch) continue;
+        const amount = parseFloat(amtMatch[1].replace(/,/g,''));
+        if(!amount || amount <= 0) continue;
+
+        // Extract recipient
+        let recipient = 'M-Pesa Transaction';
+        const sentTo = m.match(/sent to ([A-Z0-9 .&'-]+?)(?:\\s+\\d|\\s+on\\s)/i);
+        const paidTo = m.match(/paid to ([A-Z0-9 .&'-]+?)(?:\\.|\\s+on\\s)/i);
+        const buyGoods = m.match(/Buy Goods.*?(?:from|to)\\s+([A-Z0-9 .&'-]+)/i);
+        const paybill = m.match(/(?:Paybill|Pay Bill).*?([A-Z0-9 .&'-]+)/i);
+        if(sentTo) recipient = sentTo[1].trim();
+        else if(paidTo) recipient = paidTo[1].trim();
+        else if(buyGoods) recipient = buyGoods[1].trim();
+        else if(paybill) recipient = paybill[1].trim();
+
+        // Extract date
+        let date = new Date().toISOString().slice(0,10);
+        const dateMatch = m.match(/on\\s+(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})/i);
+        if(dateMatch) {
+            let [,d,mo,y] = dateMatch;
+            if(y.length === 2) y = '20'+y;
+            date = y+'-'+mo.padStart(2,'0')+'-'+d.padStart(2,'0');
+        }
+
+        const cat = autoCategory(recipient);
+
+        mpesaRows.push({
+            date: date,
+            description: recipient,
+            amount: amount,
+            category: cat,
+            payment_method: 'mpesa',
+            mpesa_ref: ref,
+            supplier: recipient,
+            import_source: 'mpesa_import',
+            vat_amount: 0
+        });
+    }
+
+    if(!mpesaRows.length) { alert('Could not parse any M-Pesa transactions. Make sure you paste the full confirmation messages.'); return; }
+
+    document.getElementById('mpesaCount').textContent = '(' + mpesaRows.length + ' transactions)';
+    let html = '';
+    mpesaRows.forEach(r => {
+        html += '<div style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">'+
+            '<div><strong>'+r.description+'</strong><br><span style="color:#666;font-size:12px;">'+r.mpesa_ref+' | '+r.date+' | '+r.category+'</span></div>'+
+            '<div><span class="badge badge-green" style="font-size:14px;">KES '+Number(r.amount).toLocaleString()+'</span></div></div>';
+    });
+    document.getElementById('mpesaParsed').innerHTML = html;
+    document.getElementById('mpesaPreview').classList.remove('hidden');
+}
+
+async function importMpesa() {
+    if(!mpesaRows.length) return;
+    const r = await (await fetch('/api/expenses/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expenses:mpesaRows})})).json();
+    document.getElementById('mpesaResult').innerHTML = '<div class="alert alert-success"><span class="import-count">'+r.imported+'</span> M-Pesa expenses imported!</div>';
+    document.getElementById('mpesaResult').classList.remove('hidden');
+    document.getElementById('mpesaPreview').classList.add('hidden');
+    mpesaRows = []; document.getElementById('mpesaText').value = '';
+}
+
+function clearMpesa() { mpesaRows = []; document.getElementById('mpesaPreview').classList.add('hidden'); }
+
+// ---- Expense List ----
+async function loadExpenses() {
+    const payFilter = document.getElementById('filterPay')?.value || '';
+    const srcFilter = document.getElementById('filterSource')?.value || '';
+    const r = await (await fetch('/api/expenses')).json();
+    const list = document.getElementById('expenseList');
+    if (!r.expenses || !r.expenses.length) { list.innerHTML='<p style="color:#666;">No expenses yet</p>'; return; }
+
+    let exps = r.expenses;
+    if(payFilter) exps = exps.filter(e => e.payment_method === payFilter);
+    if(srcFilter) exps = exps.filter(e => e.import_source === srcFilter);
+
+    const payBadge = m => {
+        const labels = {cash:'Cash',mpesa:'M-Pesa',card:'Card',bank:'Bank'};
+        return '<span class="payment-badge '+(m||'cash')+'">'+(labels[m]||'Cash')+'</span>';
+    };
+
+    list.innerHTML = exps.map(e => '<div style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:8px;display:flex;justify-content:space-between;flex-wrap:wrap;align-items:center;">'+
+        '<div><strong>'+e.description+'</strong><br><span style="color:#666;font-size:12px;">'+e.category+' | '+(e.date||'')+
+        (e.card_last4?' | ****'+e.card_last4:'')+
+        (e.mpesa_ref?' | '+e.mpesa_ref:'')+
+        (e.card_bank?' | '+e.card_bank:'')+
+        '</span></div>'+
+        '<div style="text-align:right;">'+payBadge(e.payment_method)+' <span class="badge badge-blue">KES '+fmt(e.amount)+'</span>'+
+        (e.vat_amount>0?' <span class="badge badge-green">VAT: '+fmt(e.vat_amount)+'</span>':'')+'</div></div>'
+    ).join('');
+
+    const s = r.summary;
+    document.getElementById('expenseSummary').innerHTML =
+        '<div class="stat-grid"><div class="stat"><div class="stat-value">'+s.count+'</div><div class="stat-label">Expenses</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmt(s.total)+'</div><div class="stat-label">Total Spent</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmt(s.total_vat)+'</div><div class="stat-label">Input VAT</div></div></div>';
+}
 loadExpenses();
-</script></body></html>""")
+</script>
+""" + FOOTER_HTML + "</body></html>""")
 
 # ============================================
 # PAYROLL PAGE
@@ -1534,6 +1919,18 @@ def api_expenses():
     expenses = get_expenses(uid)
     summary = get_expense_summary(uid)
     return jsonify({"expenses": expenses, "summary": summary})
+
+@app.route("/api/expenses/import", methods=["POST"])
+def api_expenses_import():
+    user = get_current_user()
+    uid = user['id'] if user else 'anonymous'
+    data = request.json
+    expenses_list = data.get('expenses', [])
+    if not expenses_list:
+        return jsonify({"error": "No expenses to import"})
+    saved = save_expenses_bulk(uid, expenses_list)
+    return jsonify({"status": "success", "imported": len(saved)})
+
 
 @app.route("/api/businesses", methods=["GET", "POST"])
 def api_businesses():
