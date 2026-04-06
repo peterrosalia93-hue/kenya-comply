@@ -1,175 +1,1263 @@
-# KenyaComply Web App
-# Flask app for Kenyan Business Compliance
-# Features: ETIMS Invoices, Tax Calculator, Tax Returns, iTax Integration, M-Pesa Payments
+# KenyaComply v3.0 - Full Tax Compliance Platform
+# ETIMS Invoices | M-Pesa Payments | Tax Returns | Payroll | Expense Tracking | P&L
 
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 import json
 import os
 import uuid
+import hashlib
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'kenyacomply-dev-secret-key')
+app.secret_key = os.environ.get('SECRET_KEY', 'kenyacomply-dev-secret-key-v3')
 
-# Import our modules
-from etims_invoice import create_standard_invoice
-from tax_calculator import calculate_paye, calculate_vat
+from etims_invoice import create_standard_invoice, ETIMSInvoice, Party, InvoiceItem
+from tax_calculator import (
+    calculate_paye, calculate_vat, calculate_nhif,
+    calculate_corporate_tax, calculate_turnover_tax,
+    calculate_withholding_tax, WITHHOLDING_RATES
+)
 from mpesa import (
     initiate_mpesa_payment, verify_mpesa_payment,
     process_mpesa_callback, PAYMENT_CONFIG
 )
+from payroll import process_payroll, generate_p9_form, generate_p9_text, generate_payslip_text
+from database import (
+    create_user, get_user_by_email, get_user_by_id, update_user,
+    create_business, get_businesses,
+    save_invoice, get_invoices, get_invoice,
+    save_payment, get_payments, update_payment,
+    save_tax_return, get_tax_returns,
+    save_expense, get_expenses, get_expense_summary,
+    save_employee, get_employees, update_employee, delete_employee,
+    save_payroll_run, get_payroll_runs,
+    get_profit_loss, DEMO_MODE as DB_DEMO_MODE
+)
 
-# In-memory stores (replace with DB in production)
-USERS = {}
-TAX_RETURNS = {}
+# ============================================
+# PRICING
+# ============================================
+PRICES = {
+    'invoice': 50,
+    'tax_return': 100,
+    'payroll': 150,
+    'p9_form': 100,
+}
+
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def get_current_user():
+    uid = session.get('user_id')
+    if not uid:
+        return None
+    return get_user_by_id(uid)
+
+# ============================================
+# SHARED CSS
+# ============================================
+BASE_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; }
+.container { max-width: 900px; margin: 0 auto; padding: 20px; }
+.navbar { background: #1a1a2e; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+.navbar .logo { font-size: 1.4rem; font-weight: bold; text-decoration: none; color: white; }
+.navbar nav { display: flex; gap: 8px; flex-wrap: wrap; }
+.navbar nav a { color: rgba(255,255,255,0.85); text-decoration: none; padding: 6px 14px; border-radius: 6px; font-size: 0.9rem; }
+.navbar nav a:hover, .navbar nav a.active { background: rgba(255,255,255,0.15); color: white; }
+.card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 20px; }
+h1 { color: #1a1a2e; margin-bottom: 8px; }
+h2 { color: #1a1a2e; margin-bottom: 15px; }
+.form-group { margin-bottom: 16px; }
+label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 0.93rem; }
+input, select, textarea { width: 100%; padding: 11px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; box-sizing: border-box; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: #1a1a2e; }
+.row { display: flex; gap: 15px; flex-wrap: wrap; }
+.col { flex: 1; min-width: 200px; }
+.btn { display: inline-block; padding: 12px 22px; border-radius: 8px; font-weight: 600; font-size: 0.95rem; text-decoration: none; border: none; cursor: pointer; text-align: center; }
+.btn-primary { background: #1a1a2e; color: white; }
+.btn-primary:hover { background: #16213e; }
+.btn-green { background: #2e7d32; color: white; }
+.btn-green:hover { background: #1b5e20; }
+.btn-blue { background: #1565c0; color: white; }
+.btn-blue:hover { background: #0d47a1; }
+.btn-mpesa { background: #4CAF50; color: white; }
+.btn-mpesa:hover { background: #388E3C; }
+.btn-outline { background: transparent; border: 2px solid #1a1a2e; color: #1a1a2e; }
+.btn-sm { padding: 8px 16px; font-size: 0.85rem; }
+.btn-full { width: 100%; }
+.btn-danger { background: #d32f2f; color: white; }
+.result { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-top: 15px; border-left: 4px solid #1a1a2e; }
+.result h3 { margin-bottom: 10px; color: #1a1a2e; }
+.result-row { display: flex; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid #e0e0e0; }
+.result-row:last-child { border-bottom: none; }
+.result-row.total { font-weight: bold; font-size: 1.1rem; background: #e8f5e9; padding: 10px; border-radius: 6px; margin-top: 5px; }
+.tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+.tab { padding: 10px 18px; background: white; border: none; border-radius: 8px; cursor: pointer; font-size: 0.9rem; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+.tab.active { background: #1a1a2e; color: white; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.stat { background: #f8f9fa; padding: 18px; border-radius: 8px; text-align: center; }
+.stat-value { font-size: 1.6rem; font-weight: bold; color: #1a1a2e; }
+.stat-label { color: #666; font-size: 0.85rem; }
+.alert { padding: 12px 15px; border-radius: 8px; margin-bottom: 15px; font-weight: 600; }
+.alert-info { background: #e3f2fd; color: #1565c0; }
+.alert-success { background: #d4edda; color: #155724; }
+.alert-warning { background: #fff3cd; color: #856404; }
+.alert-danger { background: #f8d7da; color: #721c24; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+.badge-green { background: #e8f5e9; color: #2e7d32; }
+.badge-blue { background: #e3f2fd; color: #1565c0; }
+.badge-gray { background: #f0f0f0; color: #666; }
+.steps { counter-reset: step; list-style: none; padding: 0; }
+.steps li { counter-increment: step; padding: 10px 0 10px 40px; position: relative; border-bottom: 1px solid #f0f0f0; }
+.steps li::before { content: counter(step); position: absolute; left: 0; top: 8px; background: #1a1a2e; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold; }
+table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+th, td { border: 1px solid #e0e0e0; padding: 10px; text-align: left; font-size: 0.93rem; }
+th { background: #f8f9fa; font-weight: 600; }
+.hidden { display: none; }
+footer { text-align: center; padding: 25px; opacity: 0.5; font-size: 0.85rem; }
+@media (max-width: 640px) { .container { padding: 10px; } .card { padding: 18px; } .navbar nav a { padding: 5px 10px; font-size: 0.8rem; } }
+"""
+
+# Shared JS helpers
+BASE_JS = """
+function fmt(n) { return 'KES ' + Math.round(n).toLocaleString(); }
+function showTab(tabId, evt) {
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(tabId).classList.remove('hidden');
+    if(evt) evt.target.classList.add('active');
+}
+function download(filename, text) {
+    const blob = new Blob([text], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+}
+async function mpesaPay(phone, amount, ref, resultEl) {
+    resultEl.innerHTML = '<div class="alert alert-warning">Sending M-Pesa STK Push for KES '+amount+'...</div>';
+    resultEl.classList.remove('hidden');
+    const resp = await fetch('/api/payment/initiate', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({phone, amount, account_ref: ref})
+    });
+    const r = await resp.json();
+    if (r.status !== 'success') {
+        resultEl.innerHTML = '<div class="alert alert-danger">Payment failed: '+r.message+'</div>';
+        return false;
+    }
+    const txRef = r.data.tx_ref;
+    if (r.data.demo) {
+        resultEl.innerHTML = '<div class="alert alert-success">KES '+amount+' paid (Demo Mode)</div>';
+        return true;
+    }
+    resultEl.innerHTML = '<div class="alert alert-success">STK Push sent! Check your phone...</div>';
+    for (let i = 0; i < 6; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        const v = await fetch('/api/payment/verify/'+txRef);
+        const vr = await v.json();
+        if (vr.status === 'success') {
+            resultEl.innerHTML = '<div class="alert alert-success">KES '+amount+' paid via M-Pesa</div>';
+            return true;
+        }
+        if (vr.status === 'cancelled' || vr.status === 'error') {
+            resultEl.innerHTML = '<div class="alert alert-danger">'+vr.message+'</div>';
+            return false;
+        }
+    }
+    resultEl.innerHTML = '<div class="alert alert-warning">Payment not confirmed yet. Try again.</div>';
+    return false;
+}
+"""
+
+NAVBAR_HTML = """
+<div class="navbar">
+    <a href="/" class="logo">KenyaComply</a>
+    <nav>
+        <a href="/">Home</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/invoices">Invoices</a>
+        <a href="/tax-returns">Tax Returns</a>
+        <a href="/expenses">Expenses</a>
+        <a href="/payroll">Payroll</a>
+        <a href="/reports">Reports</a>
+        <a href="/itax-guide">iTax Guide</a>
+        {% if session.get('user_id') %}
+            <a href="/logout">Logout</a>
+        {% else %}
+            <a href="/login">Login</a>
+        {% endif %}
+    </nav>
+</div>
+"""
+
+FOOTER_HTML = '<footer>KenyaComply v3.0 | Built by Mwakulomba</footer>'
 
 # ============================================
 # AUTH ROUTES
 # ============================================
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    error = ''
     if request.method == 'POST':
-        email = request.form.get('email', '')
-        name = request.form.get('name', '')
-        kra_pin = request.form.get('kra_pin', '')
-        if email:
-            if email not in USERS:
-                USERS[email] = {
-                    'id': str(uuid.uuid4()), 'email': email, 'name': name,
-                    'kra_pin': kra_pin, 'invoices': [], 'tax_returns': []
-                }
+        email = request.form.get('email', '').strip().lower()
+        name = request.form.get('name', '').strip()
+        password = request.form.get('password', '')
+        kra_pin = request.form.get('kra_pin', '').strip().upper()
+        phone = request.form.get('phone', '').strip()
+
+        if not email:
+            error = 'Email is required'
+        else:
+            user = get_user_by_email(email)
+            if user:
+                if password and user.get('password_hash') and user['password_hash'] != hash_password(password):
+                    error = 'Invalid password'
+                else:
+                    if kra_pin and kra_pin != user.get('kra_pin'):
+                        update_user(user['id'], {'kra_pin': kra_pin})
+                    if phone:
+                        update_user(user['id'], {'phone': phone})
+                    session['user_id'] = user['id']
+                    session['email'] = email
+                    return redirect(url_for('dashboard'))
             else:
-                if kra_pin:
-                    USERS[email]['kra_pin'] = kra_pin
-            session['user_id'] = USERS[email]['id']
-            session['email'] = email
-            return redirect(url_for('dashboard'))
-    return render_template_string(LOGIN_HTML)
+                user = create_user(email, name, hash_password(password) if password else '', kra_pin, phone)
+                session['user_id'] = user['id']
+                session['email'] = email
+                return redirect(url_for('dashboard'))
+
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.login-wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; background:linear-gradient(135deg,#1a1a2e,#16213e); }
+.login-card { background:white; padding:40px; border-radius:16px; box-shadow:0 8px 32px rgba(0,0,0,0.2); width:100%; max-width:440px; }
+.login-card h1 { text-align:center; margin-bottom:5px; }
+.login-card .sub { text-align:center; color:#666; margin-bottom:25px; }
+.hint { font-size:0.82rem; color:#999; margin-top:3px; }
+.error { background:#f8d7da; color:#721c24; padding:10px; border-radius:8px; margin-bottom:15px; text-align:center; }
+</style></head><body>
+<div class="login-wrap"><div class="login-card">
+<h1>KenyaComply</h1>
+<p class="sub">Tax Compliance Platform</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="POST">
+<div class="form-group"><label>Email</label><input type="email" name="email" required placeholder="you@company.co.ke"></div>
+<div class="form-group"><label>Your Name</label><input type="text" name="name" placeholder="John Doe"></div>
+<div class="form-group"><label>Password</label><input type="password" name="password" placeholder="Create or enter password"></div>
+<div class="row">
+<div class="col form-group"><label>KRA PIN</label><input type="text" name="kra_pin" placeholder="A123456789B"><div class="hint">Format: A123456789B</div></div>
+<div class="col form-group"><label>Phone</label><input type="tel" name="phone" placeholder="0712345678"></div>
+</div>
+<button class="btn btn-primary btn-full" type="submit">Continue</button>
+</form>
+<p style="text-align:center; margin-top:15px;"><a href="/" style="color:#666;">Back to home</a></p>
+</div></div></body></html>
+""", error=error)
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('index'))
+    return redirect('/')
 
 # ============================================
-# MAIN PAGES
+# HOME PAGE
 # ============================================
-
-@app.route("/")
+@app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KenyaComply - Tax Compliance & M-Pesa Payments</title>
+<style>""" + BASE_CSS + """
+.hero { background:linear-gradient(135deg,#1a1a2e,#16213e); color:white; padding:50px 20px; text-align:center; border-radius:12px; margin-bottom:25px; }
+.hero h1 { font-size:2.2rem; color:white; }
+.hero p { opacity:0.85; margin-top:8px; font-size:1.05rem; }
+.hero .badges { margin-top:18px; }
+.hero .badge { background:rgba(255,255,255,0.15); color:white; margin:3px; }
+.features { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:15px; margin-bottom:25px; }
+.feature { background:white; padding:25px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.06); text-align:center; }
+.feature h3 { color:#1a1a2e; margin:10px 0 8px; }
+.feature p { color:#666; font-size:0.9rem; }
+.feature .icon { font-size:2rem; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<div class="hero">
+    <h1>KenyaComply</h1>
+    <p>Complete Tax Compliance, M-Pesa Payments & Business Management</p>
+    <div class="badges">
+        <span class="badge">ETIMS Invoices</span>
+        <span class="badge">M-Pesa STK Push</span>
+        <span class="badge">Tax Returns</span>
+        <span class="badge">KRA iTax</span>
+        <span class="badge">Payroll</span>
+        <span class="badge">Expenses</span>
+        <span class="badge">P&L Reports</span>
+    </div>
+    <div style="margin-top:20px;">
+        <a href="/login" class="btn btn-green" style="margin:5px;">Get Started</a>
+        <a href="/calculators" class="btn btn-outline" style="border-color:white; color:white; margin:5px;">Tax Calculators</a>
+    </div>
+</div>
 
+<div class="features">
+    <div class="feature"><div class="icon">&#x1F4C4;</div><h3>ETIMS Invoices</h3><p>Generate KRA-compliant invoices. Multi-item, credit notes, recurring. Download or print.</p><a href="/invoices" class="btn btn-sm btn-primary" style="margin-top:10px;">Create Invoice</a></div>
+    <div class="feature"><div class="icon">&#x1F4B3;</div><h3>M-Pesa Payments</h3><p>Safaricom STK Push. Pay for services, collect from clients. Real-time confirmation.</p><a href="/pay" class="btn btn-sm btn-mpesa" style="margin-top:10px;">Pay Now</a></div>
+    <div class="feature"><div class="icon">&#x1F4CA;</div><h3>Tax Returns</h3><p>Income Tax, PAYE (P10), VAT, Corporate Tax, Turnover Tax. Step-by-step iTax filing.</p><a href="/tax-returns" class="btn btn-sm btn-green" style="margin-top:10px;">File Returns</a></div>
+    <div class="feature"><div class="icon">&#x1F4B0;</div><h3>Tax Calculators</h3><p>PAYE, VAT, Corporate Tax, Turnover Tax, Withholding Tax. Instant results.</p><a href="/calculators" class="btn btn-sm btn-blue" style="margin-top:10px;">Calculate</a></div>
+    <div class="feature"><div class="icon">&#x1F465;</div><h3>Payroll</h3><p>Monthly salary processing. Auto PAYE/NSSF/NHIF. Payslips. P9 forms for employees.</p><a href="/payroll" class="btn btn-sm btn-primary" style="margin-top:10px;">Run Payroll</a></div>
+    <div class="feature"><div class="icon">&#x1F4DD;</div><h3>Expense Tracker</h3><p>Log purchases with input VAT. Categories. Supplier records. VAT offset tracking.</p><a href="/expenses" class="btn btn-sm btn-primary" style="margin-top:10px;">Track Expenses</a></div>
+    <div class="feature"><div class="icon">&#x1F4C8;</div><h3>P&L Reports</h3><p>Revenue vs expenses. Profit margins. VAT summary. Export for accountant.</p><a href="/reports" class="btn btn-sm btn-blue" style="margin-top:10px;">View Reports</a></div>
+    <div class="feature"><div class="icon">&#x1F4CB;</div><h3>iTax Guide</h3><p>Step-by-step filing for every tax type. Deadlines. Penalties. KRA contacts.</p><a href="/itax-guide" class="btn btn-sm btn-primary" style="margin-top:10px;">Read Guide</a></div>
+</div>
+</div>
+""" + FOOTER_HTML + "</body></html>")
+
+# ============================================
+# DASHBOARD
+# ============================================
 @app.route('/dashboard')
 def dashboard():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
-    user = next((u for u in USERS.values() if u['id'] == session['user_id']), None)
-    invoices = user['invoices'] if user else []
-    returns = user.get('tax_returns', []) if user else []
-    return render_template_string(DASHBOARD_HTML, user=user, invoices=invoices, returns=returns)
+    user = get_current_user()
+    if not user:
+        return redirect('/login')
+    invoices = get_invoices(user['id'], limit=10)
+    payments = get_payments(user['id'], limit=10)
+    returns = get_tax_returns(user['id'], limit=10)
+    expenses = get_expenses(user['id'], limit=10)
+    businesses = get_businesses(user['id'])
+    pnl = get_profit_loss(user['id'])
 
-@app.route("/tax-returns")
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.welcome { margin-bottom:20px; }
+.kra-pin { background:#fff3cd; padding:8px 15px; border-radius:8px; font-size:0.9rem; margin-top:10px; }
+.list-item { background:#f8f9fa; padding:12px 15px; border-radius:8px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+.actions-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<div class="card welcome">
+    <h2>Welcome, {{ user.name or user.email }}</h2>
+    {% if user.kra_pin %}<div class="kra-pin">KRA PIN: <strong>{{ user.kra_pin }}</strong> | Plan: <span class="badge badge-green">{{ user.plan|upper }}</span></div>
+    {% else %}<div class="kra-pin">No KRA PIN saved. <a href="/settings">Update profile</a></div>{% endif %}
+</div>
+
+<div class="actions-row">
+    <a href="/invoices" class="btn btn-primary btn-sm">New Invoice</a>
+    <a href="/tax-returns" class="btn btn-green btn-sm">File Tax Return</a>
+    <a href="/payroll" class="btn btn-blue btn-sm">Run Payroll</a>
+    <a href="/expenses" class="btn btn-primary btn-sm">Add Expense</a>
+    <a href="/pay" class="btn btn-mpesa btn-sm">M-Pesa Pay</a>
+    <a href="/businesses" class="btn btn-outline btn-sm">My Businesses</a>
+</div>
+
+<div class="card">
+    <h2>Overview</h2>
+    <div class="stat-grid">
+        <div class="stat"><div class="stat-value">{{ invoices|length }}</div><div class="stat-label">Invoices</div></div>
+        <div class="stat"><div class="stat-value">{{ returns|length }}</div><div class="stat-label">Tax Returns</div></div>
+        <div class="stat"><div class="stat-value">{{ payments|length }}</div><div class="stat-label">Payments</div></div>
+        <div class="stat"><div class="stat-value">{{ expenses|length }}</div><div class="stat-label">Expenses</div></div>
+        <div class="stat"><div class="stat-value">KES {{ "{:,.0f}".format(pnl.total_revenue) }}</div><div class="stat-label">Revenue</div></div>
+        <div class="stat"><div class="stat-value">KES {{ "{:,.0f}".format(pnl.gross_profit) }}</div><div class="stat-label">Profit</div></div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Recent Invoices</h2>
+    {% for inv in invoices[:5] %}
+    <div class="list-item">
+        <div><strong>{{ inv.invoice_number }}</strong> | {{ inv.buyer_name }} | {{ inv.date }}</div>
+        <div><span class="badge badge-green">KES {{ "{:,.0f}".format(inv.total|float) }}</span></div>
+    </div>
+    {% else %}<p style="color:#666;">No invoices yet</p>{% endfor %}
+</div>
+
+<div class="card">
+    <h2>Recent Payments</h2>
+    {% for p in payments[:5] %}
+    <div class="list-item">
+        <div>{{ p.description or 'Payment' }} | {{ p.phone }}</div>
+        <div><span class="badge badge-blue">KES {{ "{:,.0f}".format(p.amount|float) }}</span> <span class="badge badge-green">{{ p.status }}</span></div>
+    </div>
+    {% else %}<p style="color:#666;">No payments yet</p>{% endfor %}
+</div>
+</div>
+""" + FOOTER_HTML + "</body></html>",
+    user=user, invoices=invoices, payments=payments, returns=returns,
+    expenses=expenses, businesses=businesses, pnl=pnl)
+
+# ============================================
+# INVOICES PAGE (multi-item, credit notes, recurring)
+# ============================================
+@app.route('/invoices')
+def invoices_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Invoices - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.item-row { background:#f8f9fa; padding:12px; border-radius:8px; margin-bottom:8px; }
+.remove-btn { background:#d32f2f; color:white; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<div class="card">
+    <h2>Generate ETIMS Invoice</h2>
+    <div class="tabs">
+        <button class="tab active" onclick="showTab('standard',event)">Standard</button>
+        <button class="tab" onclick="showTab('credit',event)">Credit Note</button>
+        <button class="tab" onclick="showTab('debit',event)">Debit Note</button>
+    </div>
+
+    <form id="invoiceForm">
+    <input type="hidden" name="invoice_type" id="invoiceType" value="standard">
+    <div class="row">
+        <div class="col form-group"><label>Seller Name</label><input type="text" name="seller_name" required placeholder="Your Company Ltd"></div>
+        <div class="col form-group"><label>Seller KRA PIN</label><input type="text" name="seller_pin" required placeholder="P051234567A"></div>
+    </div>
+    <div class="row">
+        <div class="col form-group"><label>Seller Phone</label><input type="tel" name="seller_phone" placeholder="+254700000000"></div>
+        <div class="col form-group"><label>Seller Address</label><input type="text" name="seller_address" value="Nairobi, Kenya"></div>
+    </div>
+    <div class="row">
+        <div class="col form-group"><label>Buyer Name</label><input type="text" name="buyer_name" required placeholder="Client Company Ltd"></div>
+        <div class="col form-group"><label>Buyer KRA PIN</label><input type="text" name="buyer_pin" required placeholder="P098765432B"></div>
+    </div>
+
+    <h3 style="margin:15px 0 10px;">Line Items</h3>
+    <div id="itemsList">
+        <div class="item-row">
+            <div class="row">
+                <div class="col form-group"><label>Description</label><input type="text" class="item-desc" required placeholder="Consulting Services"></div>
+                <div class="col form-group"><label>Qty</label><input type="number" class="item-qty" value="1" min="1"></div>
+                <div class="col form-group"><label>Unit Price (KES)</label><input type="number" class="item-price" required placeholder="50000" min="0"></div>
+                <div class="col form-group"><label>VAT %</label><select class="item-vat"><option value="16">16% (Standard)</option><option value="8">8% (Petroleum)</option><option value="0">0% (Exempt/Zero)</option></select></div>
+            </div>
+        </div>
+    </div>
+    <button type="button" onclick="addItem()" class="btn btn-outline btn-sm" style="margin-bottom:15px;">+ Add Item</button>
+
+    <div class="row">
+        <div class="col form-group"><label>Recurring Invoice?</label><select name="is_recurring" id="isRecurring"><option value="no">No</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option></select></div>
+        <div class="col form-group"><label>M-Pesa Phone (KES 50 fee)</label><input type="tel" name="phone" required placeholder="07XX XXX XXX"></div>
+    </div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 50 & Generate Invoice</button>
+    </form>
+    <div id="invoiceResult" class="result hidden"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', function() {
+        const types = {'Standard':'standard','Credit Note':'credit','Debit Note':'debit'};
+        document.getElementById('invoiceType').value = types[this.textContent] || 'standard';
+    });
+});
+
+function addItem() {
+    const list = document.getElementById('itemsList');
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.innerHTML = '<div class="row">' +
+        '<div class="col form-group"><label>Description</label><input type="text" class="item-desc" placeholder="Service/Product"></div>' +
+        '<div class="col form-group"><label>Qty</label><input type="number" class="item-qty" value="1" min="1"></div>' +
+        '<div class="col form-group"><label>Unit Price</label><input type="number" class="item-price" placeholder="0" min="0"></div>' +
+        '<div class="col form-group"><label>VAT %</label><select class="item-vat"><option value="16">16%</option><option value="8">8%</option><option value="0">0%</option></select></div>' +
+        '<div style="padding-top:28px;"><button type="button" class="remove-btn" onclick="this.closest(\\'.item-row\\').remove()">Remove</button></div>' +
+    '</div>';
+    list.appendChild(row);
+}
+
+document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const phone = fd.get('phone');
+    const items = [];
+    document.querySelectorAll('.item-row').forEach(row => {
+        const desc = row.querySelector('.item-desc').value;
+        const qty = parseFloat(row.querySelector('.item-qty').value) || 1;
+        const price = parseFloat(row.querySelector('.item-price').value) || 0;
+        const vat = parseFloat(row.querySelector('.item-vat').value);
+        if (desc && price > 0) items.push({description:desc, quantity:qty, unit_price:price, vat_rate:vat});
+    });
+    if (!items.length) { alert('Add at least one item'); return; }
+    const el = document.getElementById('invoiceResult');
+
+    const paid = await mpesaPay(phone, 50, 'KenyaComply Invoice', el);
+    if (!paid) return;
+
+    const resp = await fetch('/api/invoice', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            seller_name: fd.get('seller_name'), seller_pin: fd.get('seller_pin'),
+            seller_phone: fd.get('seller_phone'), seller_address: fd.get('seller_address'),
+            buyer_name: fd.get('buyer_name'), buyer_pin: fd.get('buyer_pin'),
+            items: items, invoice_type: fd.get('invoice_type') || 'standard',
+            is_recurring: fd.get('is_recurring') || 'no'
+        })
+    });
+    const inv = await resp.json();
+    el.innerHTML += '<h3>Invoice Generated</h3>' +
+        '<div class="result-row"><span>Invoice #</span><span>'+inv.invoice_number+'</span></div>' +
+        '<div class="result-row"><span>Date</span><span>'+inv.date+'</span></div>' +
+        '<div class="result-row"><span>Items</span><span>'+inv.item_count+'</span></div>' +
+        '<div class="result-row"><span>Subtotal</span><span>'+fmt(inv.subtotal)+'</span></div>' +
+        '<div class="result-row"><span>VAT</span><span>'+fmt(inv.vat)+'</span></div>' +
+        '<div class="result-row total"><span>Grand Total</span><span>'+fmt(inv.total)+'</span></div>' +
+        '<div style="margin-top:12px;"><button class="btn btn-green btn-sm" onclick="download(\\''+inv.invoice_number+'.txt\\',`'+inv.download_text.replace(/`/g,'\\\\`')+'`)">Download</button></div>';
+});
+</script></body></html>""")
+
+# ============================================
+# TAX CALCULATORS PAGE
+# ============================================
+@app.route('/calculators')
+def calculators_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tax Calculators - KenyaComply</title>
+<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:20px;">Tax Calculators</h1>
+<div class="tabs">
+    <button class="tab active" onclick="showTab('calcPaye',event)">PAYE</button>
+    <button class="tab" onclick="showTab('calcVat',event)">VAT</button>
+    <button class="tab" onclick="showTab('calcCorp',event)">Corporate Tax</button>
+    <button class="tab" onclick="showTab('calcTot',event)">Turnover Tax</button>
+    <button class="tab" onclick="showTab('calcWht',event)">Withholding Tax</button>
+</div>
+
+<div id="calcPaye" class="tab-content card">
+    <h2>PAYE Calculator (2024 Rates)</h2>
+    <div class="form-group"><label>Gross Monthly Salary (KES)</label><input type="number" id="payeSalary" placeholder="100000"></div>
+    <button class="btn btn-primary" onclick="calcPAYE()">Calculate</button>
+    <div id="payeResult" class="result hidden"></div>
+</div>
+
+<div id="calcVat" class="tab-content card hidden">
+    <h2>VAT Calculator (16%)</h2>
+    <div class="form-group"><label>Output Sales (KES)</label><input type="number" id="vatSales" placeholder="500000"></div>
+    <div class="row">
+        <div class="col form-group"><label>Exempt Sales</label><input type="number" id="vatExempt" value="0"></div>
+        <div class="col form-group"><label>Input VAT</label><input type="number" id="vatInput" value="0"></div>
+    </div>
+    <button class="btn btn-primary" onclick="calcVAT()">Calculate</button>
+    <div id="vatResult" class="result hidden"></div>
+</div>
+
+<div id="calcCorp" class="tab-content card hidden">
+    <h2>Corporate Tax Calculator</h2>
+    <div class="form-group"><label>Gross Income (KES)</label><input type="number" id="corpIncome" placeholder="5000000"></div>
+    <div class="row">
+        <div class="col form-group"><label>Allowable Expenses</label><input type="number" id="corpExpenses" value="0"></div>
+        <div class="col form-group"><label>Installments Paid</label><input type="number" id="corpInstallments" value="0"></div>
+    </div>
+    <div class="form-group"><label><input type="checkbox" id="corpSme"> SME (turnover < KES 500M) — 25% rate</label></div>
+    <button class="btn btn-primary" onclick="calcCorp()">Calculate</button>
+    <div id="corpResult" class="result hidden"></div>
+</div>
+
+<div id="calcTot" class="tab-content card hidden">
+    <h2>Turnover Tax (TOT) Calculator</h2>
+    <div class="alert alert-info">For businesses with annual turnover below KES 25M. Rate: 3%</div>
+    <div class="form-group"><label>Gross Turnover (KES)</label><input type="number" id="totTurnover" placeholder="2000000"></div>
+    <button class="btn btn-primary" onclick="calcTOT()">Calculate</button>
+    <div id="totResult" class="result hidden"></div>
+</div>
+
+<div id="calcWht" class="tab-content card hidden">
+    <h2>Withholding Tax Calculator</h2>
+    <div class="form-group"><label>Payment Type</label><select id="whtType">
+        <option value="dividends_resident">Dividends (Resident) - 5%</option>
+        <option value="dividends_non_resident">Dividends (Non-Resident) - 15%</option>
+        <option value="interest_resident">Interest (Resident) - 15%</option>
+        <option value="royalties_resident">Royalties (Resident) - 5%</option>
+        <option value="royalties_non_resident">Royalties (Non-Resident) - 20%</option>
+        <option value="management_fees_resident">Management Fees (Resident) - 5%</option>
+        <option value="management_fees_non_resident">Management Fees (Non-Resident) - 20%</option>
+        <option value="professional_fees_resident">Professional Fees (Resident) - 5%</option>
+        <option value="contractual_fees_resident">Contractual Fees (Resident) - 3%</option>
+        <option value="rent_resident">Rent (Resident) - 10%</option>
+        <option value="insurance_commission">Insurance Commission - 10%</option>
+    </select></div>
+    <div class="form-group"><label>Gross Amount (KES)</label><input type="number" id="whtAmount" placeholder="100000"></div>
+    <button class="btn btn-primary" onclick="calcWHT()">Calculate</button>
+    <div id="whtResult" class="result hidden"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+async function calcPAYE() {
+    const s = parseFloat(document.getElementById('payeSalary').value)||0;
+    const r = await (await fetch('/api/paye',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({salary:s})})).json();
+    document.getElementById('payeResult').innerHTML = '<h3>PAYE Breakdown</h3>'+
+        '<div class="result-row"><span>Gross</span><span>'+fmt(r.gross_salary)+'</span></div>'+
+        '<div class="result-row"><span>NSSF</span><span>'+fmt(r.nssf)+'</span></div>'+
+        '<div class="result-row"><span>Taxable</span><span>'+fmt(r.taxable_income)+'</span></div>'+
+        '<div class="result-row"><span>Tax Before Relief</span><span>'+fmt(r.tax_before_relief)+'</span></div>'+
+        '<div class="result-row"><span>Personal Relief</span><span>'+fmt(r.personal_relief)+'</span></div>'+
+        '<div class="result-row"><span>PAYE</span><span>'+fmt(r.tax_after_relief)+'</span></div>'+
+        '<div class="result-row"><span>NHIF</span><span>'+fmt(r.nhif)+'</span></div>'+
+        '<div class="result-row total"><span>NET SALARY</span><span>'+fmt(r.net_salary)+'</span></div>';
+    document.getElementById('payeResult').classList.remove('hidden');
+}
+async function calcVAT() {
+    const d = {sales:parseFloat(document.getElementById('vatSales').value)||0,exempt:parseFloat(document.getElementById('vatExempt').value)||0,input_vat:parseFloat(document.getElementById('vatInput').value)||0};
+    const r = await (await fetch('/api/vat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})).json();
+    document.getElementById('vatResult').innerHTML = '<h3>VAT</h3>'+
+        '<div class="result-row"><span>Sales</span><span>'+fmt(r.gross_sales)+'</span></div>'+
+        '<div class="result-row"><span>VAT Collected</span><span>'+fmt(r.vat_collected)+'</span></div>'+
+        '<div class="result-row"><span>Input VAT</span><span>'+fmt(r.input_vat)+'</span></div>'+
+        '<div class="result-row total"><span>NET VAT</span><span>'+fmt(r.net_vat_payable)+'</span></div>';
+    document.getElementById('vatResult').classList.remove('hidden');
+}
+async function calcCorp() {
+    const d = {income:parseFloat(document.getElementById('corpIncome').value)||0,expenses:parseFloat(document.getElementById('corpExpenses').value)||0,installments:parseFloat(document.getElementById('corpInstallments').value)||0,is_sme:document.getElementById('corpSme').checked};
+    const r = await (await fetch('/api/corporate-tax',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})).json();
+    document.getElementById('corpResult').innerHTML = '<h3>Corporate Tax</h3>'+
+        '<div class="result-row"><span>Gross Income</span><span>'+fmt(r.gross_income)+'</span></div>'+
+        '<div class="result-row"><span>Expenses</span><span>'+fmt(r.allowable_expenses)+'</span></div>'+
+        '<div class="result-row"><span>Taxable</span><span>'+fmt(r.taxable_income)+'</span></div>'+
+        '<div class="result-row"><span>Rate</span><span>'+r.tax_rate+'%</span></div>'+
+        '<div class="result-row"><span>Tax</span><span>'+fmt(r.tax_payable)+'</span></div>'+
+        '<div class="result-row total"><span>Balance Due</span><span>'+fmt(r.balance_due)+'</span></div>';
+    document.getElementById('corpResult').classList.remove('hidden');
+}
+async function calcTOT() {
+    const t = parseFloat(document.getElementById('totTurnover').value)||0;
+    const r = await (await fetch('/api/turnover-tax',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turnover:t})})).json();
+    document.getElementById('totResult').innerHTML = '<h3>Turnover Tax</h3>'+
+        '<div class="result-row"><span>Turnover</span><span>'+fmt(r.gross_turnover)+'</span></div>'+
+        '<div class="result-row"><span>Rate</span><span>'+r.tax_rate+'%</span></div>'+
+        '<div class="result-row total"><span>TOT Payable</span><span>'+fmt(r.tax_payable)+'</span></div>';
+    document.getElementById('totResult').classList.remove('hidden');
+}
+async function calcWHT() {
+    const d = {amount:parseFloat(document.getElementById('whtAmount').value)||0,tax_type:document.getElementById('whtType').value};
+    const r = await (await fetch('/api/withholding-tax',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})).json();
+    document.getElementById('whtResult').innerHTML = '<h3>Withholding Tax</h3>'+
+        '<div class="result-row"><span>Gross</span><span>'+fmt(r.gross_amount)+'</span></div>'+
+        '<div class="result-row"><span>Type</span><span>'+r.tax_type+'</span></div>'+
+        '<div class="result-row"><span>Rate</span><span>'+r.rate+'%</span></div>'+
+        '<div class="result-row"><span>WHT</span><span>'+fmt(r.tax_amount)+'</span></div>'+
+        '<div class="result-row total"><span>Net Amount</span><span>'+fmt(r.net_amount)+'</span></div>';
+    document.getElementById('whtResult').classList.remove('hidden');
+}
+</script></body></html>""")
+
+# ============================================
+# TAX RETURNS PAGE
+# ============================================
+@app.route('/tax-returns')
 def tax_returns_page():
-    return render_template_string(TAX_RETURNS_HTML)
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tax Returns - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.emp-row { background:#f8f9fa; padding:12px; border-radius:8px; margin-bottom:8px; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:5px;">File Tax Returns</h1>
+<p style="color:#666; margin-bottom:20px;">KES 100 filing fee per return via M-Pesa</p>
 
-@app.route("/itax-guide")
-def itax_guide():
-    return render_template_string(ITAX_GUIDE_HTML)
+<div class="tabs">
+    <button class="tab active" onclick="showTab('rtIncome',event)">Income Tax</button>
+    <button class="tab" onclick="showTab('rtPaye',event)">PAYE (P10)</button>
+    <button class="tab" onclick="showTab('rtVat',event)">VAT</button>
+    <button class="tab" onclick="showTab('rtCorp',event)">Corporate Tax</button>
+    <button class="tab" onclick="showTab('rtTot',event)">Turnover Tax</button>
+</div>
 
-@app.route("/print/<invoice_number>")
-def print_invoice(invoice_number):
-    invoice_data = None
-    for user in USERS.values():
-        for inv in user.get('invoices', []):
-            if inv['number'] == invoice_number:
-                invoice_data = inv
-                break
-    if not invoice_data:
-        return "Invoice not found", 404
-    return render_template_string(PRINT_HTML,
-        invoice_number=invoice_data['number'],
-        date=invoice_data['date'],
-        seller_name=invoice_data.get('seller', 'N/A'),
-        seller_pin='P000000000',
-        buyer_name=invoice_data['buyer'],
-        buyer_pin='P000000000',
-        subtotal=invoice_data['amount'] / 1.16,
-        vat=invoice_data['amount'] * 0.16 / 1.16,
-        total=invoice_data['amount']
-    )
+<!-- Income Tax -->
+<div id="rtIncome" class="tab-content card">
+    <h2>Income Tax Return (IT1)</h2>
+    <div class="alert alert-info">Deadline: 30th June annually</div>
+    <form id="incomeForm">
+    <div class="form-group"><label>Tax Year</label><select name="tax_year"><option value="2025">2025</option><option value="2024" selected>2024</option><option value="2023">2023</option></select></div>
+    <div class="form-group"><label>Annual Employment Income (KES)</label><input type="number" name="annual_income" required placeholder="1200000"></div>
+    <div class="row"><div class="col form-group"><label>Other Income</label><input type="number" name="other_income" value="0"></div><div class="col form-group"><label>Deductions</label><input type="number" name="deductions" value="0"></div></div>
+    <div class="row"><div class="col form-group"><label>PAYE Already Paid</label><input type="number" name="paye_already_paid" value="0"></div><div class="col form-group"><label>Withholding Tax Paid</label><input type="number" name="withholding_tax" value="0"></div></div>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Calculate</button>
+    </form>
+    <div id="incomeResult" class="result hidden"></div>
+</div>
 
-@app.route("/health")
-def health():
-    return {"status": "ok", "service": "kenya-comply", "version": "2.0"}
+<!-- PAYE Return -->
+<div id="rtPaye" class="tab-content card hidden">
+    <h2>PAYE Return (P10)</h2>
+    <div class="alert alert-info">Deadline: 9th of following month</div>
+    <form id="payeReturnForm">
+    <div class="form-group"><label>Period</label><select name="period" id="payePeriod">
+        <option>January 2025</option><option>February 2025</option><option selected>March 2025</option>
+        <option>April 2025</option><option>May 2025</option><option>June 2025</option>
+        <option>July 2025</option><option>August 2025</option><option>September 2025</option>
+        <option>October 2025</option><option>November 2025</option><option>December 2025</option>
+    </select></div>
+    <div id="employeeList"><div class="emp-row"><div class="row">
+        <div class="col form-group"><label>Name</label><input type="text" class="emp-name" placeholder="John Doe"></div>
+        <div class="col form-group"><label>KRA PIN</label><input type="text" class="emp-pin" placeholder="A123456789B"></div>
+        <div class="col form-group"><label>Gross Salary</label><input type="number" class="emp-gross" placeholder="100000"></div>
+    </div></div></div>
+    <button type="button" onclick="addEmp()" class="btn btn-outline btn-sm" style="margin-bottom:12px;">+ Add Employee</button>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" id="payePhone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Calculate</button>
+    </form>
+    <div id="payeReturnResult" class="result hidden"></div>
+</div>
+
+<!-- VAT Return -->
+<div id="rtVat" class="tab-content card hidden">
+    <h2>VAT Return</h2>
+    <div class="alert alert-info">Deadline: 20th of following month</div>
+    <form id="vatReturnForm">
+    <div class="form-group"><label>Period</label><select id="vatPeriod">
+        <option>January 2025</option><option>February 2025</option><option selected>March 2025</option>
+        <option>April 2025</option><option>May 2025</option><option>June 2025</option>
+        <option>July 2025</option><option>August 2025</option><option>September 2025</option>
+        <option>October 2025</option><option>November 2025</option><option>December 2025</option>
+    </select></div>
+    <div class="form-group"><label>Output Sales (KES)</label><input type="number" name="output_sales" required placeholder="500000"></div>
+    <div class="row"><div class="col form-group"><label>Exempt Sales</label><input type="number" name="exempt_sales" value="0"></div><div class="col form-group"><label>Input VAT</label><input type="number" name="input_vat" value="0"></div></div>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" id="vatPhone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Calculate</button>
+    </form>
+    <div id="vatReturnResult" class="result hidden"></div>
+</div>
+
+<!-- Corporate Tax Return -->
+<div id="rtCorp" class="tab-content card hidden">
+    <h2>Corporate Tax Return</h2>
+    <div class="alert alert-info">Deadline: 6th month after year-end</div>
+    <form id="corpReturnForm">
+    <div class="row"><div class="col form-group"><label>Gross Income (KES)</label><input type="number" name="gross_income" required placeholder="10000000"></div><div class="col form-group"><label>Allowable Expenses</label><input type="number" name="expenses" value="0"></div></div>
+    <div class="row"><div class="col form-group"><label>Installments Paid</label><input type="number" name="installments" value="0"></div><div class="col form-group"><label><input type="checkbox" name="is_sme"> SME (25% rate)</label></div></div>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" id="corpPhone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Calculate</button>
+    </form>
+    <div id="corpReturnResult" class="result hidden"></div>
+</div>
+
+<!-- Turnover Tax Return -->
+<div id="rtTot" class="tab-content card hidden">
+    <h2>Turnover Tax Return</h2>
+    <div class="alert alert-info">Deadline: 20th of following month. For businesses with turnover < KES 25M.</div>
+    <form id="totReturnForm">
+    <div class="form-group"><label>Period</label><select id="totPeriod">
+        <option>January 2025</option><option>February 2025</option><option selected>March 2025</option>
+        <option>April 2025</option><option>May 2025</option><option>June 2025</option>
+        <option>July 2025</option><option>August 2025</option><option>September 2025</option>
+        <option>October 2025</option><option>November 2025</option><option>December 2025</option>
+    </select></div>
+    <div class="form-group"><label>Gross Turnover (KES)</label><input type="number" name="turnover" required placeholder="2000000"></div>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" id="totPhone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Calculate</button>
+    </form>
+    <div id="totReturnResult" class="result hidden"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+function addEmp() {
+    const row = document.createElement('div'); row.className='emp-row';
+    row.innerHTML='<div class="row"><div class="col form-group"><label>Name</label><input type="text" class="emp-name" placeholder="Name"></div><div class="col form-group"><label>KRA PIN</label><input type="text" class="emp-pin"></div><div class="col form-group"><label>Gross</label><input type="number" class="emp-gross"></div></div>';
+    document.getElementById('employeeList').appendChild(row);
+}
+async function fileReturn(formId, resultId, getData) {
+    const form = document.getElementById(formId);
+    const fd = new FormData(form);
+    const phone = fd.get('phone') || document.getElementById(resultId.replace('Result','Phone'))?.value;
+    if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter M-Pesa phone'); return; }
+    const el = document.getElementById(resultId);
+    const paid = await mpesaPay(phone, 100, 'KenyaComply Tax Return', el);
+    if (!paid) return;
+    const data = getData(fd);
+    const r = await (await fetch('/api/tax-return',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();
+    el.innerHTML += '<h3>'+r.return_type+'</h3>';
+    if (r.employees) {
+        r.employees.forEach(e => { el.innerHTML += '<div class="emp-row"><strong>'+e.name+'</strong> | Gross: '+fmt(e.gross)+' | PAYE: '+fmt(e.paye)+' | Net: '+fmt(e.net)+'</div>'; });
+    }
+    Object.entries(r).forEach(([k,v]) => {
+        if (['status','filing_steps','employees','itax_url','ref','return_type'].includes(k)) return;
+        if (typeof v === 'number') el.innerHTML += '<div class="result-row"><span>'+k.replace(/_/g,' ')+'</span><span>'+fmt(v)+'</span></div>';
+        else if (typeof v === 'string' && v) el.innerHTML += '<div class="result-row"><span>'+k.replace(/_/g,' ')+'</span><span>'+v+'</span></div>';
+    });
+    if (r.filing_steps) {
+        el.innerHTML += '<h4 style="margin-top:15px; color:#1565c0;">Steps to File on iTax:</h4><ol class="steps">'+r.filing_steps.map(s=>'<li>'+s+'</li>').join('')+'</ol>';
+    }
+    el.innerHTML += '<a href="https://itax.kra.go.ke" target="_blank" class="btn btn-blue" style="margin-top:12px;">Open iTax</a>';
+}
+document.getElementById('incomeForm').addEventListener('submit', e => { e.preventDefault(); fileReturn('incomeForm','incomeResult', fd => ({
+    return_type:'income_tax', tax_year:fd.get('tax_year'), annual_income:parseFloat(fd.get('annual_income')||0),
+    other_income:parseFloat(fd.get('other_income')||0), deductions:parseFloat(fd.get('deductions')||0),
+    paye_already_paid:parseFloat(fd.get('paye_already_paid')||0), withholding_tax:parseFloat(fd.get('withholding_tax')||0)
+})); });
+document.getElementById('payeReturnForm').addEventListener('submit', e => { e.preventDefault();
+    const emps=[]; document.querySelectorAll('.emp-row').forEach(r=>{const g=r.querySelector('.emp-gross')?.value; if(g) emps.push({name:r.querySelector('.emp-name').value,pin:r.querySelector('.emp-pin').value,gross:parseFloat(g)});});
+    if(!emps.length){alert('Add employees');return;} fileReturn('payeReturnForm','payeReturnResult', fd=>({return_type:'paye',period:document.getElementById('payePeriod').value,employees:emps}));
+});
+document.getElementById('vatReturnForm').addEventListener('submit', e => { e.preventDefault(); fileReturn('vatReturnForm','vatReturnResult', fd=>({
+    return_type:'vat', period:document.getElementById('vatPeriod').value,
+    output_sales:parseFloat(fd.get('output_sales')||0), exempt_sales:parseFloat(fd.get('exempt_sales')||0), input_vat:parseFloat(fd.get('input_vat')||0)
+})); });
+document.getElementById('corpReturnForm').addEventListener('submit', e => { e.preventDefault(); fileReturn('corpReturnForm','corpReturnResult', fd=>({
+    return_type:'corporate', gross_income:parseFloat(fd.get('gross_income')||0), expenses:parseFloat(fd.get('expenses')||0),
+    installments:parseFloat(fd.get('installments')||0), is_sme:fd.get('is_sme')==='on'
+})); });
+document.getElementById('totReturnForm').addEventListener('submit', e => { e.preventDefault(); fileReturn('totReturnForm','totReturnResult', fd=>({
+    return_type:'turnover', period:document.getElementById('totPeriod').value, turnover:parseFloat(fd.get('turnover')||0)
+})); });
+</script></body></html>""")
 
 # ============================================
-# API ROUTES
+# EXPENSES PAGE
 # ============================================
+@app.route('/expenses')
+def expenses_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expenses - KenyaComply</title>
+<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:20px;">Expense Tracker</h1>
+<div class="card">
+    <h2>Add Expense</h2>
+    <form id="expenseForm">
+    <div class="row">
+        <div class="col form-group"><label>Description</label><input type="text" name="description" required placeholder="Office supplies"></div>
+        <div class="col form-group"><label>Category</label><select name="category">
+            <option value="office">Office Supplies</option><option value="transport">Transport</option>
+            <option value="utilities">Utilities</option><option value="rent">Rent</option>
+            <option value="salaries">Salaries</option><option value="marketing">Marketing</option>
+            <option value="professional">Professional Fees</option><option value="equipment">Equipment</option>
+            <option value="materials">Raw Materials</option><option value="insurance">Insurance</option>
+            <option value="general">General</option>
+        </select></div>
+    </div>
+    <div class="row">
+        <div class="col form-group"><label>Amount (KES)</label><input type="number" name="amount" required placeholder="5000" min="0"></div>
+        <div class="col form-group"><label>VAT Amount (KES)</label><input type="number" name="vat_amount" value="0" min="0"></div>
+    </div>
+    <div class="row">
+        <div class="col form-group"><label>Supplier</label><input type="text" name="supplier" placeholder="Supplier name"></div>
+        <div class="col form-group"><label>Supplier KRA PIN</label><input type="text" name="supplier_pin" placeholder="For VAT offset"></div>
+    </div>
+    <div class="form-group"><label>Date</label><input type="date" name="date" value=\"""" + datetime.now().strftime('%Y-%m-%d') + """"></div>
+    <button type="submit" class="btn btn-primary btn-full">Save Expense</button>
+    </form>
+    <div id="expenseResult" class="result hidden"></div>
+</div>
+<div class="card">
+    <h2>Recent Expenses</h2>
+    <div id="expenseList"><p style="color:#666;">Loading...</p></div>
+</div>
+<div class="card">
+    <h2>Summary</h2>
+    <div id="expenseSummary"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+async function loadExpenses() {
+    const r = await (await fetch('/api/expenses')).json();
+    const list = document.getElementById('expenseList');
+    if (!r.expenses || !r.expenses.length) { list.innerHTML='<p style="color:#666;">No expenses yet</p>'; return; }
+    list.innerHTML = r.expenses.map(e => '<div class="list-item" style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:8px;display:flex;justify-content:space-between;flex-wrap:wrap;">'+
+        '<div><strong>'+e.description+'</strong> | '+e.category+' | '+(e.date||'')+'</div>'+
+        '<div><span class="badge badge-blue">'+fmt(e.amount)+'</span>'+(e.vat_amount>0?' <span class="badge badge-green">VAT: '+fmt(e.vat_amount)+'</span>':'')+'</div></div>'
+    ).join('');
+    const s = r.summary;
+    document.getElementById('expenseSummary').innerHTML =
+        '<div class="stat-grid"><div class="stat"><div class="stat-value">'+s.count+'</div><div class="stat-label">Expenses</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmt(s.total)+'</div><div class="stat-label">Total Spent</div></div>'+
+        '<div class="stat"><div class="stat-value">'+fmt(s.total_vat)+'</div><div class="stat-label">Input VAT</div></div></div>';
+}
+document.getElementById('expenseForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = Object.fromEntries(fd);
+    data.amount = parseFloat(data.amount)||0;
+    data.vat_amount = parseFloat(data.vat_amount)||0;
+    const r = await (await fetch('/api/expenses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();
+    document.getElementById('expenseResult').innerHTML = '<div class="alert alert-success">Expense saved!</div>';
+    document.getElementById('expenseResult').classList.remove('hidden');
+    e.target.reset(); loadExpenses();
+});
+loadExpenses();
+</script></body></html>""")
 
-@app.route("/api/payment/initiate", methods=["POST"])
-def api_payment_initiate():
-    data = request.json
-    phone = data.get('phone', '')
-    amount = data.get('amount', PAYMENT_CONFIG['fee'])
-    account_ref = data.get('account_ref', 'KenyaComply')
-    result = initiate_mpesa_payment(phone, amount, account_ref)
-    return jsonify(result)
+# ============================================
+# PAYROLL PAGE
+# ============================================
+@app.route('/payroll')
+def payroll_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payroll - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.emp-row { background:#f8f9fa; padding:12px; border-radius:8px; margin-bottom:8px; }
+.payslip { background:#f0f7f0; padding:15px; border-radius:8px; margin-bottom:10px; border-left:4px solid #2e7d32; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:5px;">Payroll</h1>
+<p style="color:#666; margin-bottom:20px;">Monthly salary processing with auto PAYE/NSSF/NHIF. KES 150 per payroll run.</p>
 
-@app.route("/api/payment/verify/<tx_ref>", methods=["GET"])
-def api_payment_verify(tx_ref):
-    result = verify_mpesa_payment(tx_ref)
-    return jsonify(result)
+<div class="tabs">
+    <button class="tab active" onclick="showTab('runPayroll',event)">Run Payroll</button>
+    <button class="tab" onclick="showTab('p9Form',event)">P9 Form</button>
+</div>
 
-@app.route("/api/mpesa/callback", methods=["POST"])
-def api_mpesa_callback():
-    callback_data = request.json
-    result = process_mpesa_callback(callback_data)
-    return jsonify(result)
+<div id="runPayroll" class="tab-content card">
+    <h2>Run Monthly Payroll</h2>
+    <form id="payrollForm">
+    <div id="payrollEmps">
+        <div class="emp-row"><div class="row">
+            <div class="col form-group"><label>Name</label><input type="text" class="pr-name" required placeholder="John Doe"></div>
+            <div class="col form-group"><label>KRA PIN</label><input type="text" class="pr-pin" placeholder="A123456789B"></div>
+            <div class="col form-group"><label>Gross Salary</label><input type="number" class="pr-gross" required placeholder="100000"></div>
+            <div class="col form-group"><label>Allowances</label><input type="number" class="pr-allow" value="0"></div>
+        </div></div>
+    </div>
+    <button type="button" onclick="addPrEmp()" class="btn btn-outline btn-sm" style="margin-bottom:12px;">+ Add Employee</button>
+    <div class="form-group"><label>M-Pesa Phone (KES 150)</label><input type="tel" name="phone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 150 & Process Payroll</button>
+    </form>
+    <div id="payrollResult" class="result hidden"></div>
+</div>
 
-@app.route("/api/invoice", methods=["POST"])
-def api_invoice():
-    data = request.json
-    invoice = create_standard_invoice(
-        seller_name=data["seller_name"],
-        seller_pin=data["seller_pin"],
-        seller_address="Nairobi, Kenya",
-        seller_phone="+254700000000",
-        buyer_name=data["buyer_name"],
-        buyer_pin=data["buyer_pin"],
-        buyer_address="Kenya",
-        items=[{"description": "Service", "quantity": 1, "unit_price": data["amount"], "vat_rate": 16}]
-    )
-    invoice_text = f"""KENYACOMPLY ETIMS INVOICE
-========================
-Invoice Number: {invoice.invoice_number}
-Date: {invoice.date}
+<div id="p9Form" class="tab-content card hidden">
+    <h2>Generate P9 Form</h2>
+    <div class="alert alert-info">P9 form summarizes annual PAYE deductions. Employers must issue to employees by end of February. KES 100 per form.</div>
+    <form id="p9Form2">
+    <div class="row">
+        <div class="col form-group"><label>Employee Name</label><input type="text" name="emp_name" required placeholder="John Doe"></div>
+        <div class="col form-group"><label>KRA PIN</label><input type="text" name="emp_pin" required placeholder="A123456789B"></div>
+    </div>
+    <div class="form-group"><label>Monthly Gross Salary (same for all 12 months)</label><input type="number" name="monthly_gross" required placeholder="100000"></div>
+    <div class="form-group"><label>M-Pesa Phone (KES 100)</label><input type="tel" name="phone" required placeholder="07XX XXX XXX"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Pay KES 100 & Generate P9</button>
+    </form>
+    <div id="p9Result" class="result hidden"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+function addPrEmp() {
+    const row = document.createElement('div'); row.className='emp-row';
+    row.innerHTML='<div class="row"><div class="col form-group"><label>Name</label><input type="text" class="pr-name" placeholder="Name"></div><div class="col form-group"><label>KRA PIN</label><input type="text" class="pr-pin"></div><div class="col form-group"><label>Gross</label><input type="number" class="pr-gross"></div><div class="col form-group"><label>Allowances</label><input type="number" class="pr-allow" value="0"></div></div>';
+    document.getElementById('payrollEmps').appendChild(row);
+}
+document.getElementById('payrollForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const phone = new FormData(e.target).get('phone');
+    const emps = [];
+    document.querySelectorAll('#payrollEmps .emp-row').forEach(r => {
+        const g = r.querySelector('.pr-gross')?.value;
+        if(g) emps.push({name:r.querySelector('.pr-name').value, kra_pin:r.querySelector('.pr-pin').value, gross_salary:parseFloat(g), allowances:parseFloat(r.querySelector('.pr-allow').value)||0});
+    });
+    if(!emps.length){alert('Add employees');return;}
+    const el = document.getElementById('payrollResult');
+    const paid = await mpesaPay(phone, 150, 'KenyaComply Payroll', el);
+    if(!paid) return;
+    const r = await (await fetch('/api/payroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({employees:emps})})).json();
+    let html = '<h3>Payroll - '+r.period+'</h3>';
+    r.payslips.forEach(p => {
+        html += '<div class="payslip"><strong>'+p.name+'</strong> ('+p.kra_pin+')<br>'+
+            'Gross: '+fmt(p.gross_salary)+' | NSSF: '+fmt(p.nssf)+' | PAYE: '+fmt(p.paye)+' | NHIF: '+fmt(p.nhif)+' | <strong>Net: '+fmt(p.net_salary)+'</strong></div>';
+    });
+    html += '<div class="result-row total"><span>Total PAYE</span><span>'+fmt(r.totals.paye)+'</span></div>';
+    html += '<div class="result-row total"><span>Total Net Pay</span><span>'+fmt(r.totals.net)+'</span></div>';
+    el.innerHTML += html;
+});
+document.getElementById('p9Form2').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const phone = fd.get('phone');
+    const el = document.getElementById('p9Result');
+    const paid = await mpesaPay(phone, 100, 'KenyaComply P9', el);
+    if(!paid) return;
+    const r = await (await fetch('/api/p9',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        name:fd.get('emp_name'), kra_pin:fd.get('emp_pin'), monthly_gross:parseFloat(fd.get('monthly_gross'))
+    })})).json();
+    el.innerHTML += '<h3>P9 Form - '+r.employee_name+'</h3><div class="result-row"><span>KRA PIN</span><span>'+r.kra_pin+'</span></div><div class="result-row"><span>Tax Year</span><span>'+r.tax_year+'</span></div>';
+    const a = r.annual_totals;
+    el.innerHTML += '<div class="result-row"><span>Annual Gross</span><span>'+fmt(a.gross)+'</span></div><div class="result-row"><span>Annual PAYE</span><span>'+fmt(a.paye)+'</span></div><div class="result-row"><span>Annual NSSF</span><span>'+fmt(a.nssf)+'</span></div><div class="result-row"><span>Annual NHIF</span><span>'+fmt(a.nhif)+'</span></div>';
+    el.innerHTML += '<div style="margin-top:12px;"><button class="btn btn-green btn-sm" onclick="download(\\'P9_'+r.kra_pin+'.txt\\',`'+r.download_text.replace(/`/g,'\\\\`')+'`)">Download P9</button></div>';
+});
+</script></body></html>""")
 
-SELLER: {data['seller_name']} | KRA PIN: {data['seller_pin']}
-BUYER: {data['buyer_name']} | KRA PIN: {data['buyer_pin']}
+# ============================================
+# M-PESA PAY PAGE
+# ============================================
+@app.route('/pay')
+def pay_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M-Pesa Pay - KenyaComply</title>
+<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<div class="container">
+<div class="card">
+    <h2>M-Pesa Payment (Lipa Na M-Pesa)</h2>
+    <div class="alert alert-info"><strong>Safaricom STK Push</strong> - Enter phone and amount. You'll get an M-Pesa prompt to enter your PIN.</div>
+    <form id="mpesaForm">
+    <div class="form-group"><label>M-Pesa Phone Number</label><input type="tel" name="phone" required placeholder="0712 345 678"></div>
+    <div class="form-group"><label>Amount (KES)</label><input type="number" name="amount" required placeholder="1000" min="1"></div>
+    <div class="form-group"><label>Reference</label><input type="text" name="ref" value="KenyaComply"></div>
+    <button type="submit" class="btn btn-mpesa btn-full">Send STK Push</button>
+    </form>
+    <div id="mpesaResult" class="result hidden"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+document.getElementById('mpesaForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const el = document.getElementById('mpesaResult');
+    const paid = await mpesaPay(fd.get('phone'), parseFloat(fd.get('amount')), fd.get('ref'), el);
+});
+</script></body></html>""")
 
-ITEMS:
-Description     | Qty | Unit Price     | VAT  | Total
-Service         |  1  | {data['amount']:,.2f}  | 16%  | {invoice.grand_total:,.2f}
+# ============================================
+# REPORTS PAGE (P&L)
+# ============================================
+@app.route('/reports')
+def reports_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reports - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.pnl-row { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid #e0e0e0; }
+.pnl-row.header { font-weight:bold; background:#f8f9fa; padding:12px; border-radius:6px; margin:5px 0; }
+.pnl-row.profit { font-size:1.2rem; font-weight:bold; background:#e8f5e9; padding:12px; border-radius:6px; margin-top:10px; }
+.pnl-row.loss { background:#f8d7da; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:20px;">Financial Reports</h1>
+<div class="card">
+    <h2>Profit & Loss Statement</h2>
+    <div id="pnlReport"><p style="color:#666;">Loading...</p></div>
+</div>
+<div class="card">
+    <h2>Expense Breakdown</h2>
+    <div id="expenseBreakdown"></div>
+</div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+async function loadReport() {
+    const r = await (await fetch('/api/reports/pnl')).json();
+    const el = document.getElementById('pnlReport');
+    const profitClass = r.gross_profit >= 0 ? 'profit' : 'profit loss';
+    el.innerHTML =
+        '<div class="pnl-row header"><span>REVENUE</span><span></span></div>'+
+        '<div class="pnl-row"><span>Total Sales ('+r.invoice_count+' invoices)</span><span>'+fmt(r.total_revenue)+'</span></div>'+
+        '<div class="pnl-row"><span>VAT Collected</span><span>'+fmt(r.total_vat_collected)+'</span></div>'+
+        '<div class="pnl-row header"><span>EXPENSES</span><span></span></div>'+
+        '<div class="pnl-row"><span>Total Expenses ('+r.expense_count+' items)</span><span>'+fmt(r.total_expenses)+'</span></div>'+
+        '<div class="pnl-row"><span>Input VAT</span><span>'+fmt(r.total_input_vat)+'</span></div>'+
+        '<div class="pnl-row header"><span>VAT POSITION</span><span></span></div>'+
+        '<div class="pnl-row"><span>Net VAT Payable</span><span>'+fmt(r.net_vat_payable)+'</span></div>'+
+        '<div class="pnl-row '+profitClass+'"><span>GROSS PROFIT</span><span>'+fmt(r.gross_profit)+'</span></div>';
+    const cats = r.expense_by_category || {};
+    const catEl = document.getElementById('expenseBreakdown');
+    if (Object.keys(cats).length === 0) { catEl.innerHTML = '<p style="color:#666;">No expenses recorded yet</p>'; return; }
+    catEl.innerHTML = Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
+        '<div class="pnl-row"><span>'+k.charAt(0).toUpperCase()+k.slice(1)+'</span><span>'+fmt(v)+'</span></div>'
+    ).join('');
+}
+loadReport();
+</script></body></html>""")
 
-Subtotal: KES {invoice.subtotal:,.2f}
-VAT (16%): KES {invoice.total_vat:,.2f}
-GRAND TOTAL: KES {invoice.grand_total:,.2f}
+# ============================================
+# BUSINESSES PAGE
+# ============================================
+@app.route('/businesses')
+def businesses_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Businesses - KenyaComply</title>
+<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:20px;">My Businesses</h1>
+<div class="card">
+    <h2>Add Business</h2>
+    <form id="bizForm">
+    <div class="row">
+        <div class="col form-group"><label>Business Name</label><input type="text" name="name" required placeholder="My Company Ltd"></div>
+        <div class="col form-group"><label>KRA PIN</label><input type="text" name="kra_pin" required placeholder="P051234567A"></div>
+    </div>
+    <div class="row">
+        <div class="col form-group"><label>Type</label><select name="business_type"><option value="sole_proprietor">Sole Proprietor</option><option value="limited">Limited Company</option><option value="partnership">Partnership</option></select></div>
+        <div class="col form-group"><label>Phone</label><input type="tel" name="phone" placeholder="0712345678"></div>
+    </div>
+    <div class="form-group"><label>Address</label><input type="text" name="address" placeholder="Nairobi, Kenya"></div>
+    <button type="submit" class="btn btn-primary btn-full">Add Business</button>
+    </form>
+    <div id="bizResult" class="result hidden"></div>
+</div>
+<div class="card"><h2>My Businesses</h2><div id="bizList"><p style="color:#666;">Loading...</p></div></div>
+</div>
+""" + FOOTER_HTML + """
+<script>""" + BASE_JS + """
+async function loadBiz() {
+    const r = await (await fetch('/api/businesses')).json();
+    const el = document.getElementById('bizList');
+    if (!r.businesses || !r.businesses.length) { el.innerHTML='<p style="color:#666;">No businesses added yet</p>'; return; }
+    el.innerHTML = r.businesses.map(b => '<div style="background:#f8f9fa;padding:15px;border-radius:8px;margin-bottom:8px;"><strong>'+b.name+'</strong> | PIN: '+b.kra_pin+' | '+b.business_type+'</div>').join('');
+}
+document.getElementById('bizForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = Object.fromEntries(fd);
+    const r = await (await fetch('/api/businesses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();
+    document.getElementById('bizResult').innerHTML = '<div class="alert alert-success">Business added!</div>';
+    document.getElementById('bizResult').classList.remove('hidden');
+    e.target.reset(); loadBiz();
+});
+loadBiz();
+</script></body></html>""")
 
-Generated by KenyaComply - kenya-comply.vercel.app
-"""
-    if 'user_id' in session:
-        user = next((u for u in USERS.values() if u['id'] == session['user_id']), None)
-        if user:
-            user['invoices'].append({
-                'number': invoice.invoice_number, 'amount': invoice.grand_total,
-                'buyer': data["buyer_name"], 'date': invoice.date, 'seller': data["seller_name"]
-            })
-    return jsonify({
-        "invoice_number": invoice.invoice_number, "date": invoice.date,
-        "subtotal": invoice.subtotal, "vat": invoice.total_vat,
-        "total": invoice.grand_total, "download_text": invoice_text
+# ============================================
+# SETTINGS PAGE
+# ============================================
+@app.route('/settings')
+def settings_page():
+    user = get_current_user()
+    if not user:
+        return redirect('/login')
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings - KenyaComply</title>
+<style>""" + BASE_CSS + "</style></head><body>" + NAVBAR_HTML + """
+<div class="container">
+<div class="card">
+    <h2>Profile Settings</h2>
+    <form method="POST" action="/api/settings">
+    <div class="form-group"><label>Name</label><input type="text" name="name" value="{{ user.name }}"></div>
+    <div class="form-group"><label>Email</label><input type="email" value="{{ user.email }}" disabled></div>
+    <div class="row">
+        <div class="col form-group"><label>KRA PIN</label><input type="text" name="kra_pin" value="{{ user.kra_pin or '' }}" placeholder="A123456789B"></div>
+        <div class="col form-group"><label>Phone</label><input type="tel" name="phone" value="{{ user.phone or '' }}" placeholder="0712345678"></div>
+    </div>
+    <button type="submit" class="btn btn-primary">Save Changes</button>
+    </form>
+</div>
+</div>
+""" + FOOTER_HTML + "</body></html>", user=user)
+
+@app.route('/api/settings', methods=['POST'])
+def api_settings():
+    user = get_current_user()
+    if not user:
+        return redirect('/login')
+    update_user(user['id'], {
+        'name': request.form.get('name', user['name']),
+        'kra_pin': request.form.get('kra_pin', '').strip().upper(),
+        'phone': request.form.get('phone', '').strip()
     })
+    return redirect('/settings')
+
+# ============================================
+# iTAX GUIDE (comprehensive)
+# ============================================
+@app.route('/itax-guide')
+def itax_guide():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iTax Guide - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.guide-section { margin-bottom:0; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:20px;">KRA iTax Filing Guide</h1>
+
+<div class="card">
+<h2>Tax Deadlines & Penalties</h2>
+<table>
+<tr><th>Tax</th><th>Who</th><th>Deadline</th><th>Penalty</th></tr>
+<tr><td>Income Tax</td><td>Individuals</td><td style="color:#d32f2f;font-weight:bold;">30th June</td><td>KES 20,000 or 5%</td></tr>
+<tr><td>PAYE</td><td>Employers</td><td style="color:#d32f2f;font-weight:bold;">9th next month</td><td>25% + 5%/month</td></tr>
+<tr><td>VAT</td><td>Businesses >5M</td><td style="color:#d32f2f;font-weight:bold;">20th next month</td><td>KES 10,000 + 5%</td></tr>
+<tr><td>Corporate Tax</td><td>Companies</td><td style="color:#d32f2f;font-weight:bold;">6mo after year-end</td><td>5% + 1%/month</td></tr>
+<tr><td>Turnover Tax</td><td>Businesses <25M</td><td style="color:#d32f2f;font-weight:bold;">20th next month</td><td>KES 1,000/month</td></tr>
+</table></div>
+
+<div class="card"><h2>Filing Income Tax (IT1)</h2>
+<div class="alert alert-warning">Need: KRA PIN, P9 form, bank interest certificates, rental income records</div>
+<ol class="steps">
+<li>Go to <strong>itax.kra.go.ke</strong> and log in</li>
+<li>Click <strong>Returns > File Return > Income Tax Resident Individual</strong></li>
+<li>Fill employment income from P9 form</li>
+<li>Add other income (rental, business, interest)</li>
+<li>Enter deductions (NSSF, insurance, mortgage, pension)</li>
+<li>Review auto-calculated tax (personal relief KES 28,800/yr deducted)</li>
+<li>Enter PAYE already deducted and withholding tax credits</li>
+<li>Submit. Pay balance via M-Pesa Paybill <strong>572572</strong></li>
+</ol>
+<div class="alert alert-success">Use <a href="/tax-returns">Tax Return Calculator</a> to prepare figures before iTax.</div>
+</div>
+
+<div class="card"><h2>Filing PAYE (P10) - Employers</h2>
+<ol class="steps">
+<li>Log in to iTax with company KRA PIN</li>
+<li><strong>Returns > File Return > PAYE</strong></li>
+<li>Upload CSV or fill online for each employee</li>
+<li>Verify total PAYE matches payroll</li>
+<li>Submit and pay via Paybill <strong>572572</strong></li>
+<li>Issue P9 forms to employees by end of February</li>
+</ol></div>
+
+<div class="card"><h2>Filing VAT Return</h2>
+<ol class="steps">
+<li>Log in to iTax</li>
+<li><strong>Returns > File Return > VAT</strong></li>
+<li>Enter output VAT (16% of taxable sales)</li>
+<li>Enter input VAT (from valid tax invoices)</li>
+<li>Submit and pay net VAT</li>
+</ol>
+<div class="alert alert-warning">Keep all ETIMS invoices for 5 years. Use KenyaComply to generate compliant invoices.</div>
+</div>
+
+<div class="card"><h2>M-Pesa Tax Payment</h2>
+<ol class="steps">
+<li>M-Pesa > Lipa na M-Pesa > Pay Bill</li>
+<li>Business Number: <strong>572572</strong></li>
+<li>Account: <strong>KRA PIN + Tax Code</strong></li>
+<li>Enter amount and M-Pesa PIN</li>
+</ol>
+<table><tr><th>Tax</th><th>Account Format</th><th>Example</th></tr>
+<tr><td>Income Tax</td><td>PIN + IT</td><td>A123456789BIT</td></tr>
+<tr><td>PAYE</td><td>PIN + PAYE</td><td>A123456789BPAYE</td></tr>
+<tr><td>VAT</td><td>PIN + VAT</td><td>A123456789BVAT</td></tr>
+<tr><td>Corporate</td><td>PIN + CT</td><td>P123456789ACT</td></tr>
+</table></div>
+
+<div class="card"><h2>Nil Returns</h2>
+<p>Even with no income, file a nil return to avoid KES 20,000 penalty.</p>
+<ol class="steps"><li>Log in to iTax</li><li>Returns > File Return > Select "Nil Return"</li><li>Submit</li></ol></div>
+
+<div class="card"><h2>KRA Contacts</h2>
+<p><strong>Phone:</strong> 020-4-999-999 / 0711-099-999</p>
+<p><strong>Email:</strong> callcentre@kra.go.ke</p>
+<p><strong>WhatsApp:</strong> 0728-606-161</p>
+<p><strong>Portal:</strong> <a href="https://itax.kra.go.ke" target="_blank">itax.kra.go.ke</a></p>
+</div>
+</div>
+""" + FOOTER_HTML + "</body></html>")
+
+# ============================================
+# API ENDPOINTS
+# ============================================
 
 @app.route("/api/paye", methods=["POST"])
 def api_paye():
@@ -187,15 +1275,98 @@ def api_vat():
         "net_vat_payable": result.net_vat_payable
     })
 
+@app.route("/api/corporate-tax", methods=["POST"])
+def api_corporate_tax():
+    data = request.json
+    result = calculate_corporate_tax(
+        data.get("income", 0), data.get("expenses", 0),
+        data.get("is_sme", False), data.get("installments", 0)
+    )
+    return jsonify({
+        "gross_income": result.gross_income, "allowable_expenses": result.allowable_expenses,
+        "taxable_income": result.taxable_income, "tax_rate": result.tax_rate,
+        "tax_payable": result.tax_payable, "installments_paid": result.installments_paid,
+        "balance_due": result.balance_due
+    })
+
+@app.route("/api/turnover-tax", methods=["POST"])
+def api_turnover_tax():
+    data = request.json
+    result = calculate_turnover_tax(data.get("turnover", 0))
+    return jsonify({
+        "gross_turnover": result.gross_turnover, "tax_rate": result.tax_rate,
+        "tax_payable": result.tax_payable
+    })
+
+@app.route("/api/withholding-tax", methods=["POST"])
+def api_withholding_tax():
+    data = request.json
+    result = calculate_withholding_tax(data.get("amount", 0), data.get("tax_type", "professional_fees_resident"))
+    return jsonify({
+        "gross_amount": result.gross_amount, "tax_type": result.tax_type,
+        "rate": result.rate, "tax_amount": result.tax_amount, "net_amount": result.net_amount
+    })
+
+@app.route("/api/invoice", methods=["POST"])
+def api_invoice():
+    data = request.json
+    items = data.get("items", [{"description": "Service", "quantity": 1, "unit_price": data.get("amount", 0), "vat_rate": 16}])
+
+    invoice = create_standard_invoice(
+        seller_name=data.get("seller_name", ""),
+        seller_pin=data.get("seller_pin", ""),
+        seller_address=data.get("seller_address", "Nairobi, Kenya"),
+        seller_phone=data.get("seller_phone", ""),
+        buyer_name=data.get("buyer_name", ""),
+        buyer_pin=data.get("buyer_pin", ""),
+        buyer_address="Kenya",
+        items=items
+    )
+
+    lines = [f"  {i['description']:30s} x{i['quantity']} @ {i['unit_price']:,.0f} ({i.get('vat_rate',16)}% VAT)" for i in items]
+    invoice_text = f"""KENYACOMPLY ETIMS INVOICE
+========================
+Invoice #{invoice.invoice_number} | {invoice.date}
+Type: {data.get('invoice_type','standard').upper()}
+
+SELLER: {data.get('seller_name','')} | PIN: {data.get('seller_pin','')}
+BUYER: {data.get('buyer_name','')} | PIN: {data.get('buyer_pin','')}
+
+ITEMS:
+{chr(10).join(lines)}
+
+Subtotal: KES {invoice.subtotal:,.2f}
+VAT: KES {invoice.total_vat:,.2f}
+GRAND TOTAL: KES {invoice.grand_total:,.2f}
+
+Generated by KenyaComply"""
+
+    user = get_current_user()
+    if user:
+        save_invoice(user['id'], {
+            'invoice_number': invoice.invoice_number, 'seller_name': data.get('seller_name',''),
+            'seller_pin': data.get('seller_pin',''), 'buyer_name': data.get('buyer_name',''),
+            'buyer_pin': data.get('buyer_pin',''), 'items': items,
+            'subtotal': invoice.subtotal, 'vat': invoice.total_vat, 'total': invoice.grand_total,
+            'invoice_type': data.get('invoice_type', 'standard'), 'date': invoice.date,
+            'is_recurring': data.get('is_recurring', 'no') != 'no',
+            'recurrence_interval': data.get('is_recurring', 'no')
+        })
+
+    return jsonify({
+        "invoice_number": invoice.invoice_number, "date": invoice.date,
+        "item_count": len(items), "subtotal": invoice.subtotal,
+        "vat": invoice.total_vat, "total": invoice.grand_total,
+        "download_text": invoice_text
+    })
+
 @app.route("/api/tax-return", methods=["POST"])
 def api_tax_return():
-    """Generate tax return data for filing on iTax."""
     data = request.json
     return_type = data.get("return_type", "income_tax")
     ref = f"TR_{uuid.uuid4().hex[:10].upper()}"
 
     if return_type == "paye":
-        # Employer monthly PAYE return
         employees = data.get("employees", [])
         total_paye = 0
         employee_details = []
@@ -203,13 +1374,9 @@ def api_tax_return():
             result = calculate_paye(float(emp.get("gross", 0)))
             total_paye += result.tax_after_relief
             employee_details.append({
-                "name": emp.get("name", ""),
-                "pin": emp.get("pin", ""),
-                "gross": result.gross_salary,
-                "nssf": result.nssf,
-                "nhif": result.nhif,
-                "paye": result.tax_after_relief,
-                "net": result.net_salary
+                "name": emp.get("name", ""), "pin": emp.get("pin", ""),
+                "gross": result.gross_salary, "nssf": result.nssf, "nhif": result.nhif,
+                "paye": result.tax_after_relief, "net": result.net_salary
             })
         return jsonify({
             "status": "success", "ref": ref, "return_type": "PAYE (P10)",
@@ -220,10 +1387,9 @@ def api_tax_return():
                 "Login to iTax at itax.kra.go.ke",
                 "Go to Returns > File Return > PAYE",
                 "Select the tax period",
-                "Upload CSV or fill P10 form with the data below",
-                "Submit and pay via M-Pesa or bank"
-            ],
-            "itax_url": "https://itax.kra.go.ke/KRA-Portal/eReturn/returnPeriod.htm?actionCode=loadPage&ESSION_TYPE=RETURNS_R"
+                "Upload CSV or fill P10 form",
+                "Submit and pay via M-Pesa Paybill 572572"
+            ]
         })
 
     elif return_type == "vat":
@@ -243,1223 +1409,173 @@ def api_tax_return():
             "filing_steps": [
                 "Login to iTax at itax.kra.go.ke",
                 "Go to Returns > File Return > VAT",
-                "Select the tax period",
-                "Enter output sales and input VAT details",
-                "Submit and pay VAT due via M-Pesa or bank",
-                "Keep records for 5 years"
-            ],
-            "itax_url": "https://itax.kra.go.ke/KRA-Portal/eReturn/returnPeriod.htm?actionCode=loadPage&SESSION_TYPE=RETURNS_V"
+                "Enter output and input VAT",
+                "Submit and pay via M-Pesa Paybill 572572"
+            ]
+        })
+
+    elif return_type == "corporate":
+        result = calculate_corporate_tax(
+            float(data.get("gross_income", 0)),
+            float(data.get("expenses", 0)),
+            data.get("is_sme", False),
+            float(data.get("installments", 0))
+        )
+        return jsonify({
+            "status": "success", "ref": ref, "return_type": "Corporate Tax",
+            "gross_income": result.gross_income,
+            "allowable_expenses": result.allowable_expenses,
+            "taxable_income": result.taxable_income,
+            "tax_rate": result.tax_rate,
+            "tax_payable": round(result.tax_payable, 2),
+            "installments_paid": result.installments_paid,
+            "balance_due": round(result.balance_due, 2),
+            "filing_steps": [
+                "Login to iTax at itax.kra.go.ke",
+                "Go to Returns > File Return > Corporate Tax",
+                "Enter income and expenses",
+                "Submit and pay balance via M-Pesa Paybill 572572"
+            ]
+        })
+
+    elif return_type == "turnover":
+        result = calculate_turnover_tax(float(data.get("turnover", 0)))
+        return jsonify({
+            "status": "success", "ref": ref, "return_type": "Turnover Tax",
+            "period": data.get("period", datetime.now().strftime("%B %Y")),
+            "gross_turnover": result.gross_turnover,
+            "tax_rate": result.tax_rate,
+            "tax_payable": round(result.tax_payable, 2),
+            "filing_steps": [
+                "Login to iTax at itax.kra.go.ke",
+                "Go to Returns > File Return > Turnover Tax",
+                "Enter gross turnover for the period",
+                "Submit and pay via M-Pesa Paybill 572572"
+            ]
         })
 
     else:
-        # Individual Income Tax Return
+        # Income Tax IT1
         gross_annual = float(data.get("annual_income", 0))
         monthly = gross_annual / 12
         result = calculate_paye(monthly)
         annual_tax = result.tax_after_relief * 12
         annual_nssf = result.nssf * 12
-        annual_nhif = result.nhif * 12
-
         other_income = float(data.get("other_income", 0))
         deductions = float(data.get("deductions", 0))
         withholding_tax = float(data.get("withholding_tax", 0))
-        paye_paid = float(data.get("paye_already_paid", annual_tax))
-
+        paye_paid = float(data.get("paye_already_paid", 0)) or annual_tax
         total_income = gross_annual + other_income
         taxable = total_income - annual_nssf - deductions
-        # Recalculate on total
         monthly_taxable = taxable / 12
-        recalc = calculate_paye(monthly_taxable + (result.nssf))  # add back NSSF since calc deducts it
+        recalc = calculate_paye(monthly_taxable + result.nssf)
         final_tax = recalc.tax_after_relief * 12
         tax_balance = final_tax - paye_paid - withholding_tax
 
         return jsonify({
             "status": "success", "ref": ref, "return_type": "Income Tax (IT1)",
             "tax_year": data.get("tax_year", str(datetime.now().year - 1)),
-            "employment_income": gross_annual,
-            "other_income": other_income,
-            "total_income": total_income,
-            "nssf_deduction": round(annual_nssf, 2),
-            "other_deductions": deductions,
-            "taxable_income": round(taxable, 2),
-            "tax_charged": round(final_tax, 2),
-            "personal_relief": 28800,
-            "paye_already_paid": paye_paid,
-            "withholding_tax": withholding_tax,
+            "employment_income": gross_annual, "other_income": other_income,
+            "total_income": total_income, "nssf_deduction": round(annual_nssf, 2),
+            "other_deductions": deductions, "taxable_income": round(taxable, 2),
+            "tax_charged": round(final_tax, 2), "personal_relief": 28800,
+            "paye_already_paid": paye_paid, "withholding_tax": withholding_tax,
             "tax_balance": round(tax_balance, 2),
             "refund_or_payable": "REFUND" if tax_balance < 0 else "PAYABLE",
             "filing_steps": [
                 "Login to iTax at itax.kra.go.ke",
-                "Go to Returns > File Return > Income Tax - Resident Individual",
-                "Select tax year and fill in employment income",
-                "Add other income sources (rental, business, interest)",
-                "Enter allowable deductions (NSSF, insurance, mortgage)",
+                "Go to Returns > File Return > Income Tax Resident Individual",
+                "Fill employment income, other income, deductions",
                 "Review computed tax and submit",
-                "Pay any balance due or request refund"
-            ],
-            "itax_url": "https://itax.kra.go.ke/KRA-Portal/eReturn/returnPeriod.htm?actionCode=loadPage&RETURN_TYPE=IT1",
-            "deadline": "30th June" if data.get("tax_year") else "30th June annually"
+                "Pay balance via M-Pesa Paybill 572572 or request refund"
+            ]
         })
 
-# ============================================
-# HTML TEMPLATES
-# ============================================
+@app.route("/api/payroll", methods=["POST"])
+def api_payroll():
+    data = request.json
+    result = process_payroll(data.get("employees", []))
+    user = get_current_user()
+    if user:
+        save_payroll_run(user['id'], {
+            'period': result['period'], 'employees': result['payslips'],
+            'total_gross': result['totals']['total_gross'],
+            'total_paye': result['totals']['paye'],
+            'total_nssf': result['totals']['nssf'],
+            'total_nhif': result['totals']['nhif'],
+            'total_net': result['totals']['net']
+        })
+    return jsonify(result)
 
-PRINT_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Invoice - KenyaComply</title>
-    <style>
-        body { font-family: 'Courier New', monospace; margin: 40px; max-width: 800px; }
-        .invoice { border: 2px solid #000; padding: 30px; }
-        h1 { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }
-        .row { display: flex; justify-content: space-between; margin: 10px 0; }
-        .section { margin: 20px 0; }
-        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        th, td { border: 1px solid #000; padding: 10px; text-align: left; }
-        th { background: #f0f0f0; }
-        .total { font-size: 1.3em; font-weight: bold; }
-        .print-btn { background: #1a1a2e; color: white; padding: 15px 30px; border: none; cursor: pointer; font-size: 1rem; }
-        @media print { .print-btn { display: none; } }
-    </style>
-</head>
-<body>
-    <button class="print-btn" onclick="window.print()">Print Invoice</button>
-    <div class="invoice">
-        <h1>KENYACOMPLY - ETIMS INVOICE</h1>
-        <div class="section">
-            <div class="row"><strong>Invoice Number:</strong> <span>{{invoice_number}}</span></div>
-            <div class="row"><strong>Date:</strong> <span>{{date}}</span></div>
-        </div>
-        <div class="section"><h3>SELLER</h3><div>{{seller_name}}</div><div>KRA PIN: {{seller_pin}}</div></div>
-        <div class="section"><h3>BUYER</h3><div>{{buyer_name}}</div><div>KRA PIN: {{buyer_pin}}</div></div>
-        <table>
-            <tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>VAT</th><th>Total</th></tr>
-            <tr><td>Service</td><td>1</td><td>KES {{subtotal}}</td><td>16%</td><td>KES {{total}}</td></tr>
-        </table>
-        <div class="section total">
-            <div class="row"><span>Subtotal:</span> <span>KES {{subtotal}}</span></div>
-            <div class="row"><span>VAT (16%):</span> <span>KES {{vat}}</span></div>
-            <div class="row"><span>GRAND TOTAL:</span> <span>KES {{total}}</span></div>
-        </div>
-        <p style="text-align: center; margin-top: 30px;">Generated by KenyaComply | kenya-comply.vercel.app</p>
-    </div>
-</body>
-</html>
-"""
+@app.route("/api/p9", methods=["POST"])
+def api_p9():
+    data = request.json
+    monthly_gross = float(data.get("monthly_gross", 0))
+    monthly_data = [{"gross": monthly_gross} for _ in range(12)]
+    p9 = generate_p9_form(data.get("name", ""), data.get("kra_pin", ""), monthly_data)
+    p9['download_text'] = generate_p9_text(p9)
+    return jsonify(p9)
 
-LOGIN_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - KenyaComply</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); width: 100%; max-width: 420px; }
-        h1 { color: #1a1a2e; margin-bottom: 5px; text-align: center; }
-        .subtitle { color: #666; text-align: center; margin-bottom: 30px; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; }
-        input { width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; box-sizing: border-box; }
-        input:focus { outline: none; border-color: #1a1a2e; }
-        button { background: #1a1a2e; color: white; padding: 16px; border: none; border-radius: 8px; font-size: 1rem; width: 100%; cursor: pointer; font-weight: 600; }
-        button:hover { background: #16213e; }
-        .back { display: block; text-align: center; margin-top: 20px; color: #666; text-decoration: none; }
-        .hint { font-size: 0.85rem; color: #999; margin-top: 4px; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>KenyaComply</h1>
-        <p class="subtitle">Sign in to manage your tax compliance</p>
-        <form method="POST">
-            <div class="form-group">
-                <label>Email</label>
-                <input type="email" name="email" required placeholder="you@company.co.ke">
-            </div>
-            <div class="form-group">
-                <label>Your Name</label>
-                <input type="text" name="name" required placeholder="John Doe">
-            </div>
-            <div class="form-group">
-                <label>KRA PIN (Optional)</label>
-                <input type="text" name="kra_pin" placeholder="A123456789B" pattern="[A-Z][0-9]{9}[A-Z]">
-                <div class="hint">Format: A123456789B - needed for tax returns</div>
-            </div>
-            <button type="submit">Continue</button>
-        </form>
-        <a href="/" class="back">Back to home</a>
-    </div>
-</body>
-</html>
-"""
+@app.route("/api/expenses", methods=["GET", "POST"])
+def api_expenses():
+    user = get_current_user()
+    if request.method == "POST":
+        data = request.json
+        uid = user['id'] if user else 'anonymous'
+        exp = save_expense(uid, data)
+        return jsonify({"status": "success", "expense": exp})
+    uid = user['id'] if user else 'anonymous'
+    expenses = get_expenses(uid)
+    summary = get_expense_summary(uid)
+    return jsonify({"expenses": expenses, "summary": summary})
 
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard - KenyaComply</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; }
-        header { background: #1a1a2e; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
-        .logo { font-size: 1.5rem; font-weight: bold; }
-        .container { max-width: 960px; margin: 30px auto; padding: 0 20px; }
-        .card { background: white; padding: 25px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h2 { color: #1a1a2e; margin: 0 0 20px 0; }
-        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; }
-        .stat { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; }
-        .stat-value { font-size: 1.8rem; font-weight: bold; color: #1a1a2e; }
-        .stat-label { color: #666; font-size: 0.9rem; }
-        .invoice { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #1a1a2e; }
-        .invoice-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
-        .invoice-number { font-weight: bold; color: #1a1a2e; }
-        .invoice-amount { font-size: 1.2rem; font-weight: bold; color: #2e7d32; }
-        .invoice-date { color: #666; font-size: 0.9rem; }
-        .btn { display: inline-block; background: #1a1a2e; color: white; padding: 12px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 0.95rem; }
-        .btn:hover { background: #16213e; }
-        .btn-green { background: #2e7d32; }
-        .btn-green:hover { background: #1b5e20; }
-        .btn-blue { background: #1565c0; }
-        .btn-blue:hover { background: #0d47a1; }
-        .btn-outline { background: transparent; border: 2px solid #1a1a2e; color: #1a1a2e; }
-        .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-        .return-item { background: #e8f5e9; padding: 12px 15px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-        .return-type { font-weight: 600; color: #2e7d32; }
-        .return-ref { color: #666; font-size: 0.85rem; }
-        .kra-pin { background: #fff3cd; padding: 8px 15px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9rem; }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="logo">KenyaComply</div>
-        <div>
-            <a href="/" style="color: white; text-decoration: none; margin-right: 20px;">Home</a>
-            <a href="/logout" style="color: white; text-decoration: none;">Logout</a>
-        </div>
-    </header>
-    <div class="container">
-        <div class="card">
-            <h2>Welcome back, {{ user.name }}</h2>
-            {% if user.kra_pin %}
-                <div class="kra-pin">KRA PIN: <strong>{{ user.kra_pin }}</strong></div>
-            {% else %}
-                <div class="kra-pin">No KRA PIN saved. <a href="/login">Update your profile</a> to enable tax return features.</div>
-            {% endif %}
-        </div>
+@app.route("/api/businesses", methods=["GET", "POST"])
+def api_businesses():
+    user = get_current_user()
+    if not user:
+        return jsonify({"businesses": []})
+    if request.method == "POST":
+        data = request.json
+        biz = create_business(user['id'], data.get('name',''), data.get('kra_pin',''),
+                             data.get('address',''), data.get('phone',''), data.get('email',''),
+                             data.get('business_type','sole_proprietor'))
+        return jsonify({"status": "success", "business": biz})
+    return jsonify({"businesses": get_businesses(user['id'])})
 
-        <div class="card">
-            <h2>Quick Stats</h2>
-            <div class="stat-grid">
-                <div class="stat">
-                    <div class="stat-value">{{ invoices|length }}</div>
-                    <div class="stat-label">Invoices</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">{{ returns|length }}</div>
-                    <div class="stat-label">Tax Returns</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">KES {{ "{:,.0f}".format(invoices|sum(attribute='amount')) if invoices else '0' }}</div>
-                    <div class="stat-label">Total Billed</div>
-                </div>
-            </div>
-        </div>
+@app.route("/api/reports/pnl", methods=["GET"])
+def api_pnl():
+    user = get_current_user()
+    uid = user['id'] if user else 'anonymous'
+    return jsonify(get_profit_loss(uid))
 
-        <div class="card">
-            <h2>Quick Actions</h2>
-            <div class="actions">
-                <a href="/" class="btn">New Invoice</a>
-                <a href="/tax-returns" class="btn btn-green">File Tax Return</a>
-                <a href="/itax-guide" class="btn btn-blue">iTax Guide</a>
-                <a href="/" class="btn btn-outline">PAYE Calculator</a>
-                <a href="/" class="btn btn-outline">VAT Calculator</a>
-            </div>
-        </div>
+@app.route("/api/payment/initiate", methods=["POST"])
+def api_payment_initiate():
+    data = request.json
+    result = initiate_mpesa_payment(data.get('phone',''), data.get('amount', 50), data.get('account_ref','KenyaComply'))
+    user = get_current_user()
+    if user and result.get('status') == 'success':
+        save_payment(user['id'], {
+            'tx_ref': result['data']['tx_ref'], 'phone': result['data']['phone'],
+            'amount': data.get('amount', 50), 'status': 'pending',
+            'description': data.get('account_ref', 'KenyaComply')
+        })
+    return jsonify(result)
 
-        <div class="card">
-            <h2>Recent Invoices</h2>
-            {% if invoices %}
-                {% for inv in invoices|reverse %}
-                <div class="invoice">
-                    <div class="invoice-header">
-                        <span class="invoice-number">{{ inv.number }}</span>
-                        <span class="invoice-amount">KES {{ "{:,.0f}".format(inv.amount) }}</span>
-                    </div>
-                    <div class="invoice-date">{{ inv.buyer }} | {{ inv.date }}</div>
-                </div>
-                {% endfor %}
-            {% else %}
-                <p style="color: #666;">No invoices yet. Create your first one!</p>
-            {% endif %}
-        </div>
-    </div>
-</body>
-</html>
-"""
+@app.route("/api/payment/verify/<tx_ref>", methods=["GET"])
+def api_payment_verify(tx_ref):
+    result = verify_mpesa_payment(tx_ref)
+    if result.get('status') == 'success':
+        update_payment(tx_ref, {'status': 'completed', 'mpesa_receipt': result.get('data', {}).get('mpesa_receipt', '')})
+    return jsonify(result)
 
-# ============================================
-# MAIN APP HTML (Tabs: Invoice, PAYE, VAT, M-Pesa, Tax Returns)
-# ============================================
+@app.route("/api/mpesa/callback", methods=["POST"])
+def api_mpesa_callback():
+    result = process_mpesa_callback(request.json)
+    return jsonify(result)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KenyaComply - Tax Compliance & M-Pesa Payments</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; }
-        .container { max-width: 860px; margin: 0 auto; padding: 20px; }
-        header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; padding: 40px 20px; text-align: center; border-radius: 12px; margin-bottom: 30px; }
-        h1 { font-size: 2.2rem; margin-bottom: 8px; }
-        .subtitle { opacity: 0.85; font-size: 1.05rem; }
-        .badges { margin-top: 15px; }
-        .badge { display: inline-block; background: rgba(255,255,255,0.15); color: white; padding: 5px 14px; border-radius: 20px; font-size: 0.85rem; margin: 3px; }
-        .nav { display: flex; justify-content: center; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
-        .nav-link { color: white; text-decoration: none; padding: 8px 18px; border-radius: 20px; background: rgba(255,255,255,0.12); font-size: 0.95rem; }
-        .nav-link:hover { background: rgba(255,255,255,0.25); }
-        .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
-        .tab { padding: 12px 20px; background: white; border: none; border-radius: 8px; cursor: pointer; font-size: 0.95rem; transition: all 0.2s; box-shadow: 0 2px 5px rgba(0,0,0,0.08); }
-        .tab:hover { transform: translateY(-1px); }
-        .tab.active { background: #1a1a2e; color: white; }
-        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        .form-group { margin-bottom: 18px; }
-        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.95rem; }
-        input, select, textarea { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; transition: border-color 0.2s; box-sizing: border-box; }
-        input:focus, select:focus, textarea:focus { outline: none; border-color: #1a1a2e; }
-        .row { display: flex; gap: 15px; flex-wrap: wrap; }
-        .col { flex: 1; min-width: 200px; }
-        button.primary { background: #1a1a2e; color: white; padding: 15px 30px; border: none; border-radius: 8px; font-size: 1.05rem; cursor: pointer; width: 100%; transition: all 0.2s; font-weight: 600; }
-        button.primary:hover { background: #16213e; }
-        button.mpesa-btn { background: #4CAF50; }
-        button.mpesa-btn:hover { background: #388E3C; }
-        .result { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-top: 20px; border-left: 4px solid #1a1a2e; }
-        .result h3 { margin-bottom: 12px; color: #1a1a2e; }
-        .result-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e0e0e0; }
-        .result-row:last-child { border-bottom: none; font-weight: bold; font-size: 1.15rem; }
-        .btn-row { display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
-        .download-btn { background: #2e7d32; color: white; padding: 12px 20px; border: none; border-radius: 8px; font-size: 0.95rem; cursor: pointer; font-weight: 600; }
-        .print-btn { background: #1565c0; color: white; padding: 12px 20px; border: none; border-radius: 8px; font-size: 0.95rem; cursor: pointer; font-weight: 600; }
-        .payment-notice { background: #fff3cd; color: #856404; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: 600; text-align: center; }
-        .payment-status { background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin: 15px 0; text-align: center; font-weight: 600; }
-        .payment-error { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 8px; margin: 15px 0; text-align: center; font-weight: 600; }
-        .mpesa-info { background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4CAF50; }
-        .mpesa-info h4 { color: #2e7d32; margin-bottom: 5px; }
-        .itax-link { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-top: 15px; text-align: center; }
-        .itax-link a { color: #1565c0; font-weight: 600; text-decoration: none; font-size: 1.05rem; }
-        .itax-link a:hover { text-decoration: underline; }
-        .steps { counter-reset: step; list-style: none; padding: 0; }
-        .steps li { counter-increment: step; padding: 8px 0 8px 35px; position: relative; border-bottom: 1px solid #f0f0f0; }
-        .steps li::before { content: counter(step); position: absolute; left: 0; background: #1a1a2e; color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold; }
-        .hidden { display: none; }
-        footer { text-align: center; padding: 20px; opacity: 0.6; font-size: 0.9rem; }
-        @media (max-width: 600px) { .container { padding: 10px; } .card { padding: 20px; } h1 { font-size: 1.8rem; } .tabs { gap: 5px; } .tab { padding: 10px 14px; font-size: 0.85rem; } }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>KenyaComply</h1>
-            <p class="subtitle">Tax Compliance, M-Pesa Payments & iTax Filing</p>
-            <div class="badges">
-                <span class="badge">ETIMS Invoices</span>
-                <span class="badge">M-Pesa STK Push</span>
-                <span class="badge">Tax Returns</span>
-                <span class="badge">KRA iTax</span>
-            </div>
-            <div class="nav">
-                <a href="/login" class="nav-link">Login</a>
-                <a href="/dashboard" class="nav-link">Dashboard</a>
-                <a href="/tax-returns" class="nav-link">Tax Returns</a>
-                <a href="/itax-guide" class="nav-link">iTax Guide</a>
-            </div>
-        </header>
-
-        <div class="tabs">
-            <button class="tab active" onclick="showTab('invoice')">Invoice</button>
-            <button class="tab" onclick="showTab('paye')">PAYE</button>
-            <button class="tab" onclick="showTab('vat')">VAT</button>
-            <button class="tab" onclick="showTab('mpesa')">M-Pesa Pay</button>
-        </div>
-
-        <!-- Invoice Tab -->
-        <div id="invoice" class="card">
-            <h2>Generate ETIMS Invoice</h2>
-            <form id="invoiceForm">
-                <div class="row">
-                    <div class="col form-group">
-                        <label>Seller Name</label>
-                        <input type="text" name="seller_name" placeholder="Your Company Ltd" required>
-                    </div>
-                    <div class="col form-group">
-                        <label>Seller KRA PIN</label>
-                        <input type="text" name="seller_pin" placeholder="P051234567A" required>
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="col form-group">
-                        <label>Buyer Name</label>
-                        <input type="text" name="buyer_name" placeholder="Client Company Ltd" required>
-                    </div>
-                    <div class="col form-group">
-                        <label>Buyer KRA PIN</label>
-                        <input type="text" name="buyer_pin" placeholder="P098765432B" required>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>Amount (KES)</label>
-                    <input type="number" name="amount" placeholder="50000" required min="1">
-                </div>
-                <div class="form-group">
-                    <label>Phone (M-Pesa Payment)</label>
-                    <input type="tel" name="phone" placeholder="07XX XXX XXX" required>
-                </div>
-                <button type="submit" class="primary mpesa-btn">Pay KES 50 via M-Pesa & Generate Invoice</button>
-            </form>
-            <div id="invoiceResult" class="result hidden"></div>
-        </div>
-
-        <!-- PAYE Tab -->
-        <div id="paye" class="card hidden">
-            <h2>PAYE Tax Calculator (2024 Rates)</h2>
-            <p style="color:#666; margin-bottom:15px;">Calculate your Pay As You Earn tax based on current KRA rates.</p>
-            <form id="payeForm">
-                <div class="form-group">
-                    <label>Gross Monthly Salary (KES)</label>
-                    <input type="number" name="salary" placeholder="100000" required min="1">
-                </div>
-                <button type="submit" class="primary">Calculate PAYE</button>
-            </form>
-            <div id="payeResult" class="result hidden"></div>
-        </div>
-
-        <!-- VAT Tab -->
-        <div id="vat" class="card hidden">
-            <h2>VAT Calculator</h2>
-            <p style="color:#666; margin-bottom:15px;">Calculate your VAT liability (16% standard rate).</p>
-            <form id="vatForm">
-                <div class="form-group">
-                    <label>Output Sales (KES)</label>
-                    <input type="number" name="sales" placeholder="100000" required min="0">
-                </div>
-                <div class="row">
-                    <div class="col form-group">
-                        <label>Exempt Sales (KES)</label>
-                        <input type="number" name="exempt" placeholder="0" value="0">
-                    </div>
-                    <div class="col form-group">
-                        <label>Input VAT (KES)</label>
-                        <input type="number" name="input_vat" placeholder="0" value="0">
-                    </div>
-                </div>
-                <button type="submit" class="primary">Calculate VAT</button>
-            </form>
-            <div id="vatResult" class="result hidden"></div>
-        </div>
-
-        <!-- M-Pesa Direct Pay Tab -->
-        <div id="mpesa" class="card hidden">
-            <h2>M-Pesa Payment (Lipa Na M-Pesa)</h2>
-            <div class="mpesa-info">
-                <h4>Safaricom STK Push</h4>
-                <p>Enter your phone number and amount. You'll receive an M-Pesa prompt on your phone to enter your PIN.</p>
-            </div>
-            <form id="mpesaForm">
-                <div class="form-group">
-                    <label>M-Pesa Phone Number</label>
-                    <input type="tel" name="phone" placeholder="0712 345 678" required>
-                </div>
-                <div class="form-group">
-                    <label>Amount (KES)</label>
-                    <input type="number" name="amount" placeholder="1000" required min="1">
-                </div>
-                <div class="form-group">
-                    <label>Payment Reference</label>
-                    <input type="text" name="account_ref" placeholder="Invoice or Account Number" value="KenyaComply">
-                </div>
-                <button type="submit" class="primary mpesa-btn">Send M-Pesa STK Push</button>
-            </form>
-            <div id="mpesaResult" class="result hidden"></div>
-        </div>
-
-        <footer>
-            <p>KenyaComply v2.0 | Built by Mwakulomba | <a href="/itax-guide" style="color:#666;">iTax Filing Guide</a></p>
-        </footer>
-    </div>
-
-    <script>
-        function showTab(tabId) {
-            document.querySelectorAll('.card').forEach(c => c.classList.add('hidden'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(tabId).classList.remove('hidden');
-            event.target.classList.add('active');
-        }
-
-        function fmt(n) { return 'KES ' + Math.round(n).toLocaleString(); }
-
-        function downloadInvoice(filename, text) {
-            const blob = new Blob([text], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = filename + '.txt';
-            document.body.appendChild(a); a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        }
-
-        // Invoice form with M-Pesa payment
-        document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const data = Object.fromEntries(fd);
-            data.amount = parseFloat(data.amount);
-            const phone = data.phone;
-            if (!phone || phone.replace(/\\s/g,'').length < 10) {
-                alert('Please enter a valid M-Pesa phone number'); return;
-            }
-            const r = document.getElementById('invoiceResult');
-            r.innerHTML = '<div class="payment-notice">Initiating M-Pesa payment...</div>';
-            r.classList.remove('hidden');
-
-            try {
-                const payResp = await fetch('/api/payment/initiate', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone: phone, amount: 50})
-                });
-                const payResult = await payResp.json();
-
-                if (payResult.status === 'success') {
-                    const txRef = payResult.data.tx_ref;
-                    r.innerHTML = '<div class="payment-status">STK Push sent! Check your phone for M-Pesa prompt.</div>';
-
-                    // Poll for payment confirmation
-                    let confirmed = payResult.data.demo;
-                    if (!confirmed) {
-                        r.innerHTML += '<div class="payment-notice">Waiting for payment confirmation...</div>';
-                        for (let i = 0; i < 6; i++) {
-                            await new Promise(resolve => setTimeout(resolve, 5000));
-                            const vResp = await fetch('/api/payment/verify/' + txRef);
-                            const vResult = await vResp.json();
-                            if (vResult.status === 'success') { confirmed = true; break; }
-                            if (vResult.status === 'cancelled' || vResult.status === 'error') {
-                                r.innerHTML = '<div class="payment-error">Payment ' + vResult.status + ': ' + vResult.message + '</div>';
-                                return;
-                            }
-                        }
-                    }
-
-                    if (confirmed) {
-                        // Generate invoice after payment
-                        const invResp = await fetch('/api/invoice', {
-                            method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(data)
-                        });
-                        const inv = await invResp.json();
-                        r.innerHTML = `
-                            <h3>Invoice Generated</h3>
-                            <div class="result-row"><span>Invoice #</span><span>${inv.invoice_number}</span></div>
-                            <div class="result-row"><span>Date</span><span>${inv.date}</span></div>
-                            <div class="result-row"><span>Subtotal</span><span>${fmt(inv.subtotal)}</span></div>
-                            <div class="result-row"><span>VAT (16%)</span><span>${fmt(inv.vat)}</span></div>
-                            <div class="result-row"><span>Grand Total</span><span>${fmt(inv.total)}</span></div>
-                            <div class="payment-status">KES 50 paid via M-Pesa</div>
-                            <div class="btn-row">
-                                <button class="download-btn" onclick="downloadInvoice('${inv.invoice_number}', \`${inv.download_text.replace(/`/g, '\\`')}\`)">Download</button>
-                                <button class="print-btn" onclick="window.open('/print/${inv.invoice_number}')">Print</button>
-                            </div>
-                        `;
-                    } else {
-                        r.innerHTML = '<div class="payment-notice">Payment not yet confirmed. Try verifying later.</div>';
-                    }
-                } else {
-                    r.innerHTML = '<div class="payment-error">Payment failed: ' + payResult.message + '</div>';
-                }
-            } catch(err) {
-                r.innerHTML = '<div class="payment-error">Error: ' + err.message + '</div>';
-            }
-        });
-
-        // PAYE Calculator
-        document.getElementById('payeForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const salary = parseFloat(new FormData(e.target).get('salary'));
-            const resp = await fetch('/api/paye', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({salary})
-            });
-            const r = await resp.json();
-            const el = document.getElementById('payeResult');
-            el.innerHTML = `
-                <h3>PAYE Breakdown</h3>
-                <div class="result-row"><span>Gross Salary</span><span>${fmt(r.gross_salary)}</span></div>
-                <div class="result-row"><span>NSSF (6%)</span><span>${fmt(r.nssf)}</span></div>
-                <div class="result-row"><span>Taxable Income</span><span>${fmt(r.taxable_income)}</span></div>
-                <div class="result-row"><span>Tax Before Relief</span><span>${fmt(r.tax_before_relief)}</span></div>
-                <div class="result-row"><span>Personal Relief</span><span>${fmt(r.personal_relief)}</span></div>
-                <div class="result-row"><span>PAYE (Tax)</span><span>${fmt(r.tax_after_relief)}</span></div>
-                <div class="result-row"><span>NHIF</span><span>${fmt(r.nhif)}</span></div>
-                <div class="result-row"><span>NET SALARY</span><span>${fmt(r.net_salary)}</span></div>
-                <div class="itax-link">
-                    <a href="/tax-returns">File PAYE Return on iTax &rarr;</a>
-                </div>
-            `;
-            el.classList.remove('hidden');
-        });
-
-        // VAT Calculator
-        document.getElementById('vatForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const data = {
-                sales: parseFloat(fd.get('sales')),
-                exempt: parseFloat(fd.get('exempt') || 0),
-                input_vat: parseFloat(fd.get('input_vat') || 0)
-            };
-            const resp = await fetch('/api/vat', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
-            });
-            const r = await resp.json();
-            const el = document.getElementById('vatResult');
-            el.innerHTML = `
-                <h3>VAT Breakdown</h3>
-                <div class="result-row"><span>Output Sales</span><span>${fmt(r.gross_sales)}</span></div>
-                <div class="result-row"><span>Exempt Sales</span><span>${fmt(r.vat_exempt)}</span></div>
-                <div class="result-row"><span>VAT Collected (16%)</span><span>${fmt(r.vat_collected)}</span></div>
-                <div class="result-row"><span>Input VAT</span><span>${fmt(r.input_vat)}</span></div>
-                <div class="result-row"><span>NET VAT PAYABLE</span><span>${fmt(r.net_vat_payable)}</span></div>
-                <div class="itax-link">
-                    <a href="/tax-returns">File VAT Return on iTax &rarr;</a>
-                </div>
-            `;
-            el.classList.remove('hidden');
-        });
-
-        // M-Pesa Direct Payment
-        document.getElementById('mpesaForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const phone = fd.get('phone');
-            const amount = parseFloat(fd.get('amount'));
-            const account_ref = fd.get('account_ref') || 'KenyaComply';
-            const el = document.getElementById('mpesaResult');
-            el.innerHTML = '<div class="payment-notice">Sending STK Push to ' + phone + '...</div>';
-            el.classList.remove('hidden');
-
-            try {
-                const resp = await fetch('/api/payment/initiate', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone, amount, account_ref})
-                });
-                const r = await resp.json();
-
-                if (r.status === 'success') {
-                    const txRef = r.data.tx_ref;
-                    el.innerHTML = `
-                        <div class="payment-status">STK Push sent! Check your phone.</div>
-                        <div class="result-row"><span>Transaction Ref</span><span>${txRef}</span></div>
-                        <div class="result-row"><span>Amount</span><span>${fmt(amount)}</span></div>
-                        <div class="result-row"><span>Phone</span><span>${r.data.phone}</span></div>
-                        ${r.data.demo ? '<div class="payment-notice">DEMO MODE - No real charge</div>' : ''}
-                        <div class="btn-row">
-                            <button class="download-btn" onclick="checkPayment('${txRef}')">Check Payment Status</button>
-                        </div>
-                    `;
-                } else {
-                    el.innerHTML = '<div class="payment-error">Failed: ' + r.message + '</div>';
-                }
-            } catch(err) {
-                el.innerHTML = '<div class="payment-error">Error: ' + err.message + '</div>';
-            }
-        });
-
-        async function checkPayment(txRef) {
-            const resp = await fetch('/api/payment/verify/' + txRef);
-            const r = await resp.json();
-            const el = document.getElementById('mpesaResult');
-            if (r.status === 'success') {
-                el.innerHTML = '<div class="payment-status">Payment Confirmed! Receipt: ' + (r.data.mpesa_receipt || 'N/A') + '</div>';
-            } else if (r.status === 'pending') {
-                el.innerHTML += '<div class="payment-notice">Still pending... Try again in a few seconds.</div>';
-            } else {
-                el.innerHTML += '<div class="payment-error">' + r.status + ': ' + r.message + '</div>';
-            }
-        }
-    </script>
-</body>
-</html>
-"""
-
-# ============================================
-# TAX RETURNS PAGE
-# ============================================
-
-TAX_RETURNS_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Tax Returns - KenyaComply</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; }
-        .container { max-width: 860px; margin: 0 auto; padding: 20px; }
-        header { background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%); color: white; padding: 35px 20px; text-align: center; border-radius: 12px; margin-bottom: 25px; }
-        h1 { font-size: 2rem; margin-bottom: 8px; }
-        .nav { display: flex; gap: 10px; margin-top: 15px; justify-content: center; flex-wrap: wrap; }
-        .nav a { color: white; text-decoration: none; padding: 8px 18px; border-radius: 20px; background: rgba(255,255,255,0.15); }
-        .nav a:hover { background: rgba(255,255,255,0.25); }
-        .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
-        .tab { padding: 12px 20px; background: white; border: none; border-radius: 8px; cursor: pointer; font-size: 0.95rem; box-shadow: 0 2px 5px rgba(0,0,0,0.08); }
-        .tab.active { background: #2e7d32; color: white; }
-        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        h2 { color: #2e7d32; margin-bottom: 15px; }
-        .form-group { margin-bottom: 18px; }
-        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.95rem; }
-        input, select { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; box-sizing: border-box; }
-        input:focus, select:focus { outline: none; border-color: #2e7d32; }
-        .row { display: flex; gap: 15px; flex-wrap: wrap; }
-        .col { flex: 1; min-width: 200px; }
-        button.primary { background: #2e7d32; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 1.05rem; cursor: pointer; width: 100%; font-weight: 600; }
-        button.primary:hover { background: #1b5e20; }
-        .result { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-top: 20px; border-left: 4px solid #2e7d32; }
-        .result h3 { margin-bottom: 12px; color: #2e7d32; }
-        .result-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e0e0e0; }
-        .result-row:last-child { border-bottom: none; }
-        .result-row.total { font-weight: bold; font-size: 1.15rem; background: #e8f5e9; padding: 12px; border-radius: 6px; margin-top: 5px; }
-        .steps { counter-reset: step; list-style: none; padding: 0; margin-top: 15px; }
-        .steps li { counter-increment: step; padding: 10px 0 10px 40px; position: relative; border-bottom: 1px solid #f0f0f0; }
-        .steps li::before { content: counter(step); position: absolute; left: 0; background: #2e7d32; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: bold; }
-        .itax-btn { display: inline-block; background: #1565c0; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-top: 15px; font-size: 1rem; }
-        .itax-btn:hover { background: #0d47a1; }
-        .mpesa-btn { display: inline-block; background: #4CAF50; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-top: 10px; font-size: 1rem; border: none; cursor: pointer; }
-        .info-box { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #1565c0; }
-        .info-box h4 { color: #1565c0; margin-bottom: 5px; }
-        .warning { background: #fff3cd; padding: 12px; border-radius: 8px; color: #856404; margin: 10px 0; font-weight: 600; text-align: center; }
-        .emp-row { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e0e0e0; }
-        .mpesa-btn { background: #4CAF50; }
-        .mpesa-btn:hover { background: #388E3C; }
-        .payment-notice { background: #fff3cd; color: #856404; padding: 12px; border-radius: 8px; margin: 10px 0; font-weight: 600; text-align: center; }
-        .payment-status { background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin: 10px 0; text-align: center; font-weight: 600; }
-        .payment-error { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 8px; margin: 10px 0; text-align: center; font-weight: 600; }
-        .hidden { display: none; }
-        footer { text-align: center; padding: 20px; opacity: 0.6; font-size: 0.9rem; }
-        @media (max-width: 600px) { .container { padding: 10px; } .card { padding: 20px; } h1 { font-size: 1.6rem; } }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>File Tax Returns</h1>
-            <p>Prepare your KRA tax return data, then file on iTax (KES 100 filing fee)</p>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/dashboard">Dashboard</a>
-                <a href="/itax-guide">iTax Guide</a>
-            </div>
-        </header>
-
-        <div class="tabs">
-            <button class="tab active" onclick="showReturnTab('income')">Income Tax (IT1)</button>
-            <button class="tab" onclick="showReturnTab('payeReturn')">PAYE Return (P10)</button>
-            <button class="tab" onclick="showReturnTab('vatReturn')">VAT Return</button>
-        </div>
-
-        <!-- Income Tax Return -->
-        <div id="income" class="card">
-            <h2>Individual Income Tax Return (IT1)</h2>
-            <div class="info-box">
-                <h4>Deadline: 30th June annually</h4>
-                <p>File your annual income tax return. This tool calculates your tax and provides data to enter on iTax.</p>
-            </div>
-            <form id="incomeForm">
-                <div class="form-group">
-                    <label>Tax Year</label>
-                    <select name="tax_year">
-                        <option value="2025">2025</option>
-                        <option value="2024" selected>2024</option>
-                        <option value="2023">2023</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Annual Employment Income (KES)</label>
-                    <input type="number" name="annual_income" placeholder="1200000" required min="0">
-                </div>
-                <div class="row">
-                    <div class="col form-group">
-                        <label>Other Income (Rental, Business, etc.)</label>
-                        <input type="number" name="other_income" placeholder="0" value="0">
-                    </div>
-                    <div class="col form-group">
-                        <label>Allowable Deductions</label>
-                        <input type="number" name="deductions" placeholder="0" value="0">
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="col form-group">
-                        <label>PAYE Already Paid (P9 Form)</label>
-                        <input type="number" name="paye_already_paid" placeholder="Auto-calculated" value="0">
-                    </div>
-                    <div class="col form-group">
-                        <label>Withholding Tax Paid</label>
-                        <input type="number" name="withholding_tax" placeholder="0" value="0">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
-                    <input type="tel" name="phone" placeholder="07XX XXX XXX" required>
-                </div>
-                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate Return</button>
-            </form>
-            <div id="incomeResult" class="result hidden"></div>
-        </div>
-
-        <!-- PAYE Return -->
-        <div id="payeReturn" class="card hidden">
-            <h2>Employer PAYE Return (P10)</h2>
-            <div class="info-box">
-                <h4>Deadline: 9th of the following month</h4>
-                <p>Monthly PAYE return for employers. Add employees below to calculate total PAYE due.</p>
-            </div>
-            <form id="payeReturnForm">
-                <div class="form-group">
-                    <label>Return Period</label>
-                    <select name="period" id="payePeriod">
-                        <option>January 2025</option><option>February 2025</option><option selected>March 2025</option>
-                        <option>April 2025</option><option>May 2025</option><option>June 2025</option>
-                        <option>July 2025</option><option>August 2025</option><option>September 2025</option>
-                        <option>October 2025</option><option>November 2025</option><option>December 2025</option>
-                    </select>
-                </div>
-                <div id="employeeList">
-                    <div class="emp-row">
-                        <div class="row">
-                            <div class="col form-group"><label>Employee Name</label><input type="text" class="emp-name" placeholder="John Doe"></div>
-                            <div class="col form-group"><label>KRA PIN</label><input type="text" class="emp-pin" placeholder="A123456789B"></div>
-                            <div class="col form-group"><label>Gross Salary</label><input type="number" class="emp-gross" placeholder="100000"></div>
-                        </div>
-                    </div>
-                </div>
-                <button type="button" onclick="addEmployee()" style="background:#e8f5e9; color:#2e7d32; border:2px solid #2e7d32; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:600; margin-bottom:15px;">+ Add Employee</button>
-                <div class="form-group">
-                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
-                    <input type="tel" name="phone" id="payePhone" placeholder="07XX XXX XXX" required>
-                </div>
-                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate PAYE Return</button>
-            </form>
-            <div id="payeReturnResult" class="result hidden"></div>
-        </div>
-
-        <!-- VAT Return -->
-        <div id="vatReturn" class="card hidden">
-            <h2>VAT Return</h2>
-            <div class="info-box">
-                <h4>Deadline: 20th of the following month</h4>
-                <p>Monthly VAT return for VAT-registered businesses (turnover > KES 5M/year).</p>
-            </div>
-            <form id="vatReturnForm">
-                <div class="form-group">
-                    <label>Return Period</label>
-                    <select name="period" id="vatPeriod">
-                        <option>January 2025</option><option>February 2025</option><option selected>March 2025</option>
-                        <option>April 2025</option><option>May 2025</option><option>June 2025</option>
-                        <option>July 2025</option><option>August 2025</option><option>September 2025</option>
-                        <option>October 2025</option><option>November 2025</option><option>December 2025</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Total Output Sales (KES)</label>
-                    <input type="number" name="output_sales" placeholder="500000" required min="0">
-                </div>
-                <div class="row">
-                    <div class="col form-group">
-                        <label>Exempt Sales (KES)</label>
-                        <input type="number" name="exempt_sales" placeholder="0" value="0">
-                    </div>
-                    <div class="col form-group">
-                        <label>Input VAT (KES)</label>
-                        <input type="number" name="input_vat" placeholder="0" value="0">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
-                    <input type="tel" name="phone" id="vatPhone" placeholder="07XX XXX XXX" required>
-                </div>
-                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate VAT Return</button>
-            </form>
-            <div id="vatReturnResult" class="result hidden"></div>
-        </div>
-
-        <footer>KenyaComply v2.0 | <a href="/itax-guide" style="color:#666;">iTax Filing Guide</a></footer>
-    </div>
-
-    <script>
-        function showReturnTab(tabId) {
-            document.querySelectorAll('.card').forEach(c => c.classList.add('hidden'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(tabId).classList.remove('hidden');
-            event.target.classList.add('active');
-        }
-
-        function fmt(n) { return 'KES ' + Math.round(n).toLocaleString(); }
-
-        function addEmployee() {
-            const list = document.getElementById('employeeList');
-            const row = document.createElement('div');
-            row.className = 'emp-row';
-            row.innerHTML = `<div class="row">
-                <div class="col form-group"><label>Employee Name</label><input type="text" class="emp-name" placeholder="Jane Doe"></div>
-                <div class="col form-group"><label>KRA PIN</label><input type="text" class="emp-pin" placeholder="A123456789B"></div>
-                <div class="col form-group"><label>Gross Salary</label><input type="number" class="emp-gross" placeholder="80000"></div>
-            </div>`;
-            list.appendChild(row);
-        }
-
-        // M-Pesa payment helper for tax returns (KES 100)
-        async function payAndProcess(phone, resultEl, processCallback) {
-            resultEl.innerHTML = '<div class="payment-notice">Sending M-Pesa STK Push for KES 100 filing fee...</div>';
-            resultEl.classList.remove('hidden');
-            try {
-                const payResp = await fetch('/api/payment/initiate', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone, amount: 100, account_ref: 'KenyaComply Tax Return'})
-                });
-                const payResult = await payResp.json();
-                if (payResult.status !== 'success') {
-                    resultEl.innerHTML = '<div class="payment-error">Payment failed: ' + payResult.message + '</div>';
-                    return;
-                }
-                const txRef = payResult.data.tx_ref;
-                resultEl.innerHTML = '<div class="payment-status">STK Push sent! Check your phone for M-Pesa prompt.</div>';
-                let confirmed = payResult.data.demo;
-                if (!confirmed) {
-                    resultEl.innerHTML += '<div class="payment-notice">Waiting for payment confirmation...</div>';
-                    for (let i = 0; i < 6; i++) {
-                        await new Promise(resolve => setTimeout(resolve, 5000));
-                        const vResp = await fetch('/api/payment/verify/' + txRef);
-                        const vResult = await vResp.json();
-                        if (vResult.status === 'success') { confirmed = true; break; }
-                        if (vResult.status === 'cancelled' || vResult.status === 'error') {
-                            resultEl.innerHTML = '<div class="payment-error">Payment ' + vResult.status + ': ' + vResult.message + '</div>';
-                            return;
-                        }
-                    }
-                }
-                if (!confirmed) {
-                    resultEl.innerHTML = '<div class="payment-notice">Payment not yet confirmed. Please try again.</div>';
-                    return;
-                }
-                resultEl.innerHTML = '<div class="payment-status">KES 100 filing fee paid via M-Pesa</div>';
-                await processCallback(resultEl);
-            } catch(err) {
-                resultEl.innerHTML = '<div class="payment-error">Error: ' + err.message + '</div>';
-            }
-        }
-
-        // Income Tax Return
-        document.getElementById('incomeForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.target);
-            const phone = fd.get('phone');
-            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
-            const el = document.getElementById('incomeResult');
-            const data = {
-                return_type: 'income_tax',
-                tax_year: fd.get('tax_year'),
-                annual_income: parseFloat(fd.get('annual_income') || 0),
-                other_income: parseFloat(fd.get('other_income') || 0),
-                deductions: parseFloat(fd.get('deductions') || 0),
-                paye_already_paid: parseFloat(fd.get('paye_already_paid') || 0),
-                withholding_tax: parseFloat(fd.get('withholding_tax') || 0)
-            };
-            await payAndProcess(phone, el, async (resultEl) => {
-                const resp = await fetch('/api/tax-return', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(data)
-                });
-                const r = await resp.json();
-                const balanceClass = r.tax_balance < 0 ? 'color:#2e7d32' : 'color:#d32f2f';
-                resultEl.innerHTML += `
-                    <h3>Income Tax Return - ${r.tax_year}</h3>
-                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                    <div class="result-row"><span>Employment Income</span><span>${fmt(r.employment_income)}</span></div>
-                    <div class="result-row"><span>Other Income</span><span>${fmt(r.other_income)}</span></div>
-                    <div class="result-row"><span>Total Income</span><span>${fmt(r.total_income)}</span></div>
-                    <div class="result-row"><span>NSSF Deduction</span><span>${fmt(r.nssf_deduction)}</span></div>
-                    <div class="result-row"><span>Other Deductions</span><span>${fmt(r.other_deductions)}</span></div>
-                    <div class="result-row"><span>Taxable Income</span><span>${fmt(r.taxable_income)}</span></div>
-                    <div class="result-row"><span>Tax Charged</span><span>${fmt(r.tax_charged)}</span></div>
-                    <div class="result-row"><span>Personal Relief</span><span>${fmt(r.personal_relief)}</span></div>
-                    <div class="result-row"><span>PAYE Already Paid</span><span>${fmt(r.paye_already_paid)}</span></div>
-                    <div class="result-row"><span>Withholding Tax</span><span>${fmt(r.withholding_tax)}</span></div>
-                    <div class="result-row total"><span>${r.refund_or_payable}</span><span style="${balanceClass}">${fmt(Math.abs(r.tax_balance))}</span></div>
-                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File on iTax:</h4>
-                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-                `;
-            });
-        });
-
-        // PAYE Return
-        document.getElementById('payeReturnForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const phone = document.getElementById('payePhone').value;
-            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
-            const employees = [];
-            document.querySelectorAll('.emp-row').forEach(row => {
-                const name = row.querySelector('.emp-name').value;
-                const pin = row.querySelector('.emp-pin').value;
-                const gross = row.querySelector('.emp-gross').value;
-                if (gross) employees.push({name, pin, gross: parseFloat(gross)});
-            });
-            if (!employees.length) { alert('Add at least one employee'); return; }
-            const period = document.getElementById('payePeriod').value;
-            const el = document.getElementById('payeReturnResult');
-            await payAndProcess(phone, el, async (resultEl) => {
-                const resp = await fetch('/api/tax-return', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({return_type: 'paye', period, employees})
-                });
-                const r = await resp.json();
-                let empRows = r.employees.map(e =>
-                    `<div class="emp-row"><div class="row">
-                        <div class="col"><strong>${e.name || 'Employee'}</strong> (${e.pin || 'N/A'})</div>
-                        <div class="col">Gross: ${fmt(e.gross)}</div>
-                        <div class="col">PAYE: ${fmt(e.paye)}</div>
-                        <div class="col">Net: ${fmt(e.net)}</div>
-                    </div></div>`
-                ).join('');
-                resultEl.innerHTML += `
-                    <h3>PAYE Return (P10) - ${r.period}</h3>
-                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                    <div class="result-row"><span>Employees</span><span>${r.total_employees}</span></div>
-                    ${empRows}
-                    <div class="result-row total"><span>Total PAYE Due</span><span>${fmt(r.total_paye)}</span></div>
-                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
-                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-                `;
-            });
-        });
-
-        // VAT Return
-        document.getElementById('vatReturnForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const phone = document.getElementById('vatPhone').value;
-            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
-            const fd = new FormData(e.target);
-            const data = {
-                return_type: 'vat',
-                period: document.getElementById('vatPeriod').value,
-                output_sales: parseFloat(fd.get('output_sales') || 0),
-                exempt_sales: parseFloat(fd.get('exempt_sales') || 0),
-                input_vat: parseFloat(fd.get('input_vat') || 0)
-            };
-            const el = document.getElementById('vatReturnResult');
-            await payAndProcess(phone, el, async (resultEl) => {
-                const resp = await fetch('/api/tax-return', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(data)
-                });
-                const r = await resp.json();
-                resultEl.innerHTML += `
-                    <h3>VAT Return - ${r.period}</h3>
-                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                    <div class="result-row"><span>Output Sales</span><span>${fmt(r.output_sales)}</span></div>
-                    <div class="result-row"><span>Exempt Sales</span><span>${fmt(r.exempt_sales)}</span></div>
-                    <div class="result-row"><span>VAT Collected (16%)</span><span>${fmt(r.vat_collected)}</span></div>
-                    <div class="result-row"><span>Input VAT</span><span>${fmt(r.input_vat)}</span></div>
-                    <div class="result-row total"><span>Net VAT Payable</span><span>${fmt(r.net_vat_payable)}</span></div>
-                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
-                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-                `;
-            });
-        });
-    </script>
-</body>
-</html>
-"""
-
-# ============================================
-# iTAX GUIDE PAGE
-# ============================================
-
-ITAX_GUIDE_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>iTax Filing Guide - KenyaComply</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; line-height: 1.7; }
-        .container { max-width: 860px; margin: 0 auto; padding: 20px; }
-        header { background: linear-gradient(135deg, #1565c0 0%, #0d47a1 100%); color: white; padding: 35px 20px; text-align: center; border-radius: 12px; margin-bottom: 25px; }
-        h1 { font-size: 2rem; margin-bottom: 8px; }
-        .nav { display: flex; gap: 10px; margin-top: 15px; justify-content: center; flex-wrap: wrap; }
-        .nav a { color: white; text-decoration: none; padding: 8px 18px; border-radius: 20px; background: rgba(255,255,255,0.15); }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        h2 { color: #1565c0; margin-bottom: 15px; font-size: 1.4rem; }
-        h3 { color: #1a1a2e; margin: 20px 0 10px; }
-        .steps { counter-reset: step; list-style: none; padding: 0; }
-        .steps li { counter-increment: step; padding: 12px 0 12px 45px; position: relative; border-bottom: 1px solid #f0f0f0; }
-        .steps li::before { content: counter(step); position: absolute; left: 0; top: 10px; background: #1565c0; color: white; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.9rem; font-weight: bold; }
-        .steps li:last-child { border-bottom: none; }
-        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-        th, td { border: 1px solid #e0e0e0; padding: 12px; text-align: left; }
-        th { background: #e3f2fd; color: #1565c0; }
-        .deadline { color: #d32f2f; font-weight: bold; }
-        .highlight { background: #e8f5e9; padding: 15px; border-radius: 8px; border-left: 4px solid #2e7d32; margin: 15px 0; }
-        .warning { background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #f9a825; margin: 15px 0; }
-        .itax-btn { display: inline-block; background: #1565c0; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; margin: 8px 5px; }
-        .itax-btn.green { background: #2e7d32; }
-        .itax-btn:hover { opacity: 0.9; }
-        .contact { background: #f8f9fa; padding: 20px; border-radius: 8px; }
-        .contact p { margin: 5px 0; }
-        footer { text-align: center; padding: 20px; opacity: 0.6; font-size: 0.9rem; }
-        @media (max-width: 600px) { .container { padding: 10px; } .card { padding: 18px; } }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>KRA iTax Filing Guide</h1>
-            <p>Step-by-step guide to filing your taxes on the KRA iTax portal</p>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/dashboard">Dashboard</a>
-                <a href="/tax-returns">File Returns</a>
-            </div>
-        </header>
-
-        <div class="card">
-            <h2>Tax Filing Deadlines</h2>
-            <table>
-                <tr><th>Tax Type</th><th>Who Must File</th><th>Deadline</th><th>Penalty</th></tr>
-                <tr><td>Income Tax (IT1)</td><td>All individuals with income</td><td class="deadline">30th June</td><td>KES 20,000 or 5% of tax due</td></tr>
-                <tr><td>PAYE (P10)</td><td>Employers</td><td class="deadline">9th of next month</td><td>25% of PAYE due + 5%/month interest</td></tr>
-                <tr><td>VAT</td><td>Businesses (turnover > KES 5M)</td><td class="deadline">20th of next month</td><td>KES 10,000 + 5% of VAT due</td></tr>
-                <tr><td>Corporate Tax</td><td>Companies</td><td class="deadline">6th month after year-end</td><td>5% of tax due + 1%/month</td></tr>
-                <tr><td>Turnover Tax (TOT)</td><td>Small businesses (< KES 25M)</td><td class="deadline">20th of next month</td><td>KES 1,000/month late</td></tr>
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>How to File Income Tax Return (IT1)</h2>
-            <div class="warning">
-                <strong>You need:</strong> KRA PIN, P9 form from employer, bank interest certificates, rental income records
-            </div>
-            <ol class="steps">
-                <li>Go to <strong>itax.kra.go.ke</strong> and log in with your KRA PIN and password</li>
-                <li>Click <strong>Returns</strong> from the top menu, then <strong>File Return</strong></li>
-                <li>Select <strong>Income Tax - Resident Individual</strong> and the correct tax year</li>
-                <li>Fill in <strong>Section A</strong>: Employment income from your P9 form (basic salary, allowances, benefits)</li>
-                <li>Fill in <strong>Section B</strong>: Other income (rental income, business income, interest, dividends)</li>
-                <li>Fill in <strong>Section C</strong>: Deductions (NSSF, life insurance, mortgage interest, pension contributions)</li>
-                <li>Review the auto-calculated tax. The system deducts personal relief (KES 28,800/year) automatically</li>
-                <li>Enter PAYE already deducted (from P9) and any withholding tax credits</li>
-                <li>Submit the return. If tax is due, pay via M-Pesa (Paybill 572572) or bank</li>
-                <li>Download and save the acknowledgement receipt</li>
-            </ol>
-            <div class="highlight">
-                <strong>Tip:</strong> Use KenyaComply's <a href="/tax-returns">Tax Return Calculator</a> to prepare your figures before logging into iTax. This saves time and reduces errors.
-            </div>
-            <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-            <a href="/tax-returns" class="itax-btn green">Calculate Your Tax First</a>
-        </div>
-
-        <div class="card">
-            <h2>How to File PAYE Return (P10) - Employers</h2>
-            <ol class="steps">
-                <li>Log in to iTax with your company's KRA PIN</li>
-                <li>Go to <strong>Returns > File Return > PAYE</strong></li>
-                <li>Select the return period (month/year)</li>
-                <li>Choose <strong>Upload CSV</strong> or <strong>Fill Online</strong></li>
-                <li>For each employee: enter KRA PIN, gross pay, taxable pay, PAYE deducted, NSSF, NHIF</li>
-                <li>System auto-totals. Verify total PAYE matches your payroll</li>
-                <li>Submit and pay total PAYE via M-Pesa Paybill <strong>572572</strong></li>
-                <li>Issue P9 forms to employees by end of February for annual filing</li>
-            </ol>
-            <div class="highlight">
-                Use KenyaComply's <a href="/tax-returns">PAYE Return Calculator</a> to compute each employee's PAYE before filing.
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>How to File VAT Return</h2>
-            <ol class="steps">
-                <li>Log in to iTax with your company's KRA PIN</li>
-                <li>Go to <strong>Returns > File Return > VAT</strong></li>
-                <li>Select the return period</li>
-                <li>Enter <strong>Output VAT</strong> (16% of taxable sales you made)</li>
-                <li>Enter <strong>Input VAT</strong> (VAT you paid on purchases with valid tax invoices)</li>
-                <li>System calculates net VAT payable (Output - Input)</li>
-                <li>Submit and pay via M-Pesa Paybill <strong>572572</strong> or bank</li>
-            </ol>
-            <div class="warning">
-                <strong>Important:</strong> Keep all ETIMS invoices for 5 years. KRA can audit anytime.
-                Use KenyaComply to generate ETIMS-compliant invoices.
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>M-Pesa Tax Payment</h2>
-            <div class="highlight">
-                <h3>Pay KRA via M-Pesa</h3>
-                <ol class="steps">
-                    <li>Go to M-Pesa > <strong>Lipa na M-Pesa > Pay Bill</strong></li>
-                    <li>Business Number: <strong>572572</strong></li>
-                    <li>Account Number: Your <strong>KRA PIN + Tax Type</strong> (e.g., A123456789B + IT for Income Tax)</li>
-                    <li>Enter amount and your M-Pesa PIN</li>
-                    <li>You'll receive a confirmation SMS. Save it!</li>
-                </ol>
-            </div>
-            <table>
-                <tr><th>Tax Type</th><th>Account Format</th><th>Example</th></tr>
-                <tr><td>Income Tax</td><td>PIN + IT</td><td>A123456789BIT</td></tr>
-                <tr><td>PAYE</td><td>PIN + PAYE</td><td>A123456789BPAYE</td></tr>
-                <tr><td>VAT</td><td>PIN + VAT</td><td>A123456789BVAT</td></tr>
-                <tr><td>Corporate Tax</td><td>PIN + CT</td><td>P123456789ACT</td></tr>
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>Nil Returns</h2>
-            <p>Even if you had <strong>no income</strong>, you must still file a nil return to avoid penalties.</p>
-            <ol class="steps">
-                <li>Log in to iTax</li>
-                <li>Go to Returns > File Return > Income Tax Resident Individual</li>
-                <li>Select "Nil Return" option</li>
-                <li>Submit - no payment needed</li>
-            </ol>
-        </div>
-
-        <div class="card contact">
-            <h2>KRA Help Contacts</h2>
-            <p><strong>Phone:</strong> 020-4-999-999 / 0711-099-999</p>
-            <p><strong>Email:</strong> callcentre@kra.go.ke</p>
-            <p><strong>WhatsApp:</strong> 0728-606-161</p>
-            <p><strong>Nearest KRA Office:</strong> <a href="https://www.kra.go.ke/helping-tax-payers/stations" target="_blank">Find your local office</a></p>
-            <p><strong>iTax Help:</strong> <a href="https://itax.kra.go.ke" target="_blank">itax.kra.go.ke</a></p>
-        </div>
-
-        <footer>KenyaComply v2.0 | <a href="/" style="color:#666;">Back to Home</a></footer>
-    </div>
-</body>
-</html>
-"""
+@app.route("/health")
+def health():
+    return {"status": "ok", "service": "kenya-comply", "version": "3.0", "db": "supabase" if not DB_DEMO_MODE else "in-memory"}
 
 # Run the app
 app.debug = True

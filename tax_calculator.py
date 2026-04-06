@@ -194,6 +194,96 @@ def calculate_vat(
     )
 
 
+# ============================================
+# CORPORATE TAX
+# ============================================
+@dataclass
+class CorporateTaxResult:
+    gross_income: float
+    allowable_expenses: float
+    taxable_income: float
+    tax_rate: float
+    tax_payable: float
+    installments_paid: float
+    balance_due: float
+
+def calculate_corporate_tax(
+    gross_income: float,
+    allowable_expenses: float = 0,
+    is_sme: bool = False,
+    installments_paid: float = 0
+) -> CorporateTaxResult:
+    """Calculate Corporate Tax. SME rate 25%, standard 30%."""
+    taxable = max(0, gross_income - allowable_expenses)
+    rate = 0.25 if is_sme else 0.30
+    tax = taxable * rate
+    balance = max(0, tax - installments_paid)
+    return CorporateTaxResult(
+        gross_income=gross_income, allowable_expenses=allowable_expenses,
+        taxable_income=taxable, tax_rate=rate * 100,
+        tax_payable=tax, installments_paid=installments_paid,
+        balance_due=balance
+    )
+
+
+# ============================================
+# TURNOVER TAX (TOT)
+# ============================================
+@dataclass
+class TurnoverTaxResult:
+    gross_turnover: float
+    tax_rate: float
+    tax_payable: float
+
+def calculate_turnover_tax(gross_turnover: float) -> TurnoverTaxResult:
+    """
+    Turnover Tax for businesses with annual turnover < KES 25M.
+    Rate: 3% of gross turnover (effective from Jan 2023).
+    """
+    rate = 0.03
+    tax = gross_turnover * rate
+    return TurnoverTaxResult(
+        gross_turnover=gross_turnover, tax_rate=3.0, tax_payable=tax
+    )
+
+
+# ============================================
+# WITHHOLDING TAX
+# ============================================
+WITHHOLDING_RATES = {
+    'dividends_resident': 5,
+    'dividends_non_resident': 15,
+    'interest_resident': 15,
+    'interest_non_resident': 15,
+    'royalties_resident': 5,
+    'royalties_non_resident': 20,
+    'management_fees_resident': 5,
+    'management_fees_non_resident': 20,
+    'professional_fees_resident': 5,
+    'professional_fees_non_resident': 20,
+    'contractual_fees_resident': 3,
+    'rent_resident': 10,
+    'insurance_commission': 10,
+}
+
+@dataclass
+class WithholdingTaxResult:
+    gross_amount: float
+    tax_type: str
+    rate: float
+    tax_amount: float
+    net_amount: float
+
+def calculate_withholding_tax(amount: float, tax_type: str) -> WithholdingTaxResult:
+    """Calculate Withholding Tax based on payment type."""
+    rate = WITHHOLDING_RATES.get(tax_type, 5)
+    tax = amount * (rate / 100)
+    return WithholdingTaxResult(
+        gross_amount=amount, tax_type=tax_type.replace('_', ' ').title(),
+        rate=rate, tax_amount=tax, net_amount=amount - tax
+    )
+
+
 def generate_tax_summary(paye_result: PAYEResult) -> str:
     """Generate a human-readable tax summary"""
     summary = f"""
