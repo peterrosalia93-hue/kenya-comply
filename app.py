@@ -1,5 +1,5 @@
-# KenyaComply v3.0 - Full Tax Compliance Platform
-# ETIMS Invoices | M-Pesa Payments | Tax Returns | Payroll | Expense Tracking | P&L
+# KenyaComply v3.1 - Full Tax Compliance Platform + AI Tax Agent
+# ETIMS Invoices | M-Pesa Payments | Tax Returns | Payroll | Expense Tracking | P&L | AI Agent
 
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 import json
@@ -22,6 +22,10 @@ from mpesa import (
     process_mpesa_callback, PAYMENT_CONFIG
 )
 from payroll import process_payroll, generate_p9_form, generate_p9_text, generate_payslip_text
+from tax_agent import (
+    analyze_user_data, auto_prepare_return, generate_filing_csv,
+    get_upcoming_deadlines, ask_tax_advisor
+)
 from database import (
     create_user, get_user_by_email, get_user_by_id, update_user,
     create_business, get_businesses,
@@ -182,6 +186,7 @@ NAVBAR_HTML = """
         <a href="/payroll">Payroll</a>
         <a href="/reports">Reports</a>
         <a href="/itax-guide">iTax Guide</a>
+        <a href="/agent">AI Agent</a>
         {% if session.get('user_id') %}
             <a href="/logout">Logout</a>
         {% else %}
@@ -310,6 +315,7 @@ def index():
     <div class="feature"><div class="icon">&#x1F4DD;</div><h3>Expense Tracker</h3><p>Log purchases with input VAT. Categories. Supplier records. VAT offset tracking.</p><a href="/expenses" class="btn btn-sm btn-primary" style="margin-top:10px;">Track Expenses</a></div>
     <div class="feature"><div class="icon">&#x1F4C8;</div><h3>P&L Reports</h3><p>Revenue vs expenses. Profit margins. VAT summary. Export for accountant.</p><a href="/reports" class="btn btn-sm btn-blue" style="margin-top:10px;">View Reports</a></div>
     <div class="feature"><div class="icon">&#x1F4CB;</div><h3>iTax Guide</h3><p>Step-by-step filing for every tax type. Deadlines. Penalties. KRA contacts.</p><a href="/itax-guide" class="btn btn-sm btn-primary" style="margin-top:10px;">Read Guide</a></div>
+    <div class="feature"><div class="icon">&#x1F916;</div><h3>AI Tax Agent</h3><p>Auto-analyzes your data, calculates obligations, prepares returns, and answers tax questions.</p><a href="/agent" class="btn btn-sm btn-green" style="margin-top:10px;">Launch Agent</a></div>
 </div>
 </div>
 """ + FOOTER_HTML + "</body></html>")
@@ -1573,9 +1579,273 @@ def api_mpesa_callback():
     result = process_mpesa_callback(request.json)
     return jsonify(result)
 
+# ============================================
+# AI TAX AGENT - Page & API
+# ============================================
+@app.route('/agent')
+def agent_page():
+    return render_template_string("""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Tax Agent - KenyaComply</title>
+<style>""" + BASE_CSS + """
+.agent-card { background:#fff; border-radius:12px; padding:20px; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+.obligation { border-left:4px solid #007bff; padding:12px 16px; margin-bottom:10px; background:#f8f9fa; border-radius:0 8px 8px 0; }
+.obligation.urgent { border-left-color:#dc3545; background:#fff5f5; }
+.deadline-badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:13px; font-weight:600; }
+.deadline-badge.urgent { background:#dc3545; color:#fff; }
+.deadline-badge.normal { background:#28a745; color:#fff; }
+.rec { padding:10px 14px; border-radius:8px; margin-bottom:8px; }
+.rec.high { background:#fff3cd; border-left:4px solid #ffc107; }
+.rec.medium { background:#d1ecf1; border-left:4px solid #17a2b8; }
+.rec.info { background:#f0f0f0; border-left:4px solid #6c757d; }
+.chat-box { border:1px solid #ddd; border-radius:12px; max-height:400px; overflow-y:auto; padding:16px; background:#fafafa; margin-bottom:12px; }
+.chat-msg { margin-bottom:12px; padding:10px 14px; border-radius:10px; max-width:85%; }
+.chat-msg.user { background:#007bff; color:#fff; margin-left:auto; }
+.chat-msg.ai { background:#fff; border:1px solid #ddd; }
+.chat-msg pre { white-space:pre-wrap; margin:8px 0 0; font-size:13px; }
+.loading { text-align:center; padding:20px; color:#666; }
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:20px; }
+.summary-item { background:#f8f9fa; padding:14px; border-radius:10px; text-align:center; }
+.summary-item .val { font-size:22px; font-weight:700; color:#007bff; }
+.summary-item .label { font-size:12px; color:#666; margin-top:4px; }
+</style></head><body>
+""" + NAVBAR_HTML + """
+<div class="container">
+<h1 style="margin-bottom:5px;">AI Tax Agent</h1>
+<p style="color:#666; margin-bottom:20px;">Auto-analyzes your data, calculates obligations, prepares returns & answers tax questions</p>
+
+<div class="tabs">
+    <button class="tab active" onclick="showTab('agAnalysis',event)">Tax Analysis</button>
+    <button class="tab" onclick="showTab('agPrepare',event)">Auto-Prepare Returns</button>
+    <button class="tab" onclick="showTab('agAdvisor',event)">Tax Advisor Chat</button>
+</div>
+
+<!-- Tax Analysis -->
+<div id="agAnalysis" class="tab-content">
+    <div class="agent-card">
+        <button class="btn btn-green btn-full" onclick="runAnalysis()" id="analyzeBtn">Analyze My Tax Obligations</button>
+        <div id="analysisResult" class="loading hidden">Analyzing your data...</div>
+    </div>
+    <div id="analysisDash" class="hidden">
+        <div id="summaryGrid" class="summary-grid"></div>
+        <h3>Upcoming Deadlines</h3>
+        <div id="deadlines"></div>
+        <h3 style="margin-top:16px;">Tax Obligations</h3>
+        <div id="obligations"></div>
+        <h3 style="margin-top:16px;">Recommendations</h3>
+        <div id="recommendations"></div>
+    </div>
+</div>
+
+<!-- Auto-Prepare -->
+<div id="agPrepare" class="tab-content hidden">
+    <div class="agent-card">
+        <h3>Auto-Prepare a Tax Return</h3>
+        <p style="color:#666;margin-bottom:12px;">The agent fills in your return from invoices, expenses & payroll data.</p>
+        <div class="form-group"><label>Return Type</label>
+        <select id="prepReturnType">
+            <option value="income_tax">Income Tax (IT1)</option>
+            <option value="vat">VAT Return</option>
+            <option value="paye">PAYE (P10)</option>
+            <option value="corporate">Corporate Tax</option>
+            <option value="turnover">Turnover Tax</option>
+        </select></div>
+        <button class="btn btn-blue btn-full" onclick="autoPrepare()">Auto-Prepare Return</button>
+    </div>
+    <div id="prepResult" class="hidden"></div>
+</div>
+
+<!-- Tax Advisor Chat -->
+<div id="agAdvisor" class="tab-content hidden">
+    <div class="agent-card">
+        <h3>Ask the Tax Advisor</h3>
+        <p style="color:#666;margin-bottom:12px;">AI-powered Kenyan tax advice. Ask about PAYE, VAT, deadlines, filing steps, penalties, and more.</p>
+        <div class="chat-box" id="chatBox">
+            <div class="chat-msg ai">Hello! I'm your KenyaComply Tax Advisor. Ask me anything about Kenyan taxes, KRA filing, deadlines, or compliance.</div>
+        </div>
+        <form onsubmit="askAdvisor(event)" style="display:flex;gap:8px;">
+            <input type="text" id="chatInput" placeholder="e.g. When is PAYE due? How do I file nil returns?" style="flex:1;" required>
+            <button type="submit" class="btn btn-green">Ask</button>
+        </form>
+    </div>
+</div>
+</div>
+
+<script>
+function showTab(id, e) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(id).classList.remove('hidden');
+    if(e) e.target.classList.add('active');
+}
+
+async function runAnalysis() {
+    const btn = document.getElementById('analyzeBtn');
+    const loading = document.getElementById('analysisResult');
+    btn.disabled = true; btn.textContent = 'Analyzing...';
+    loading.classList.remove('hidden');
+    try {
+        const res = await fetch('/api/agent/analyze');
+        const data = await res.json();
+        if(data.error) { loading.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+        document.getElementById('analysisDash').classList.remove('hidden');
+        loading.classList.add('hidden');
+
+        // Summary grid
+        const s = data.summary;
+        document.getElementById('summaryGrid').innerHTML =
+            '<div class="summary-item"><div class="val">KES '+fmt(s.total_revenue)+'</div><div class="label">Total Revenue</div></div>'+
+            '<div class="summary-item"><div class="val">KES '+fmt(s.total_expenses)+'</div><div class="label">Total Expenses</div></div>'+
+            '<div class="summary-item"><div class="val">KES '+fmt(s.gross_profit)+'</div><div class="label">Gross Profit</div></div>'+
+            '<div class="summary-item"><div class="val">KES '+fmt(data.total_tax_liability)+'</div><div class="label">Total Tax Liability</div></div>'+
+            '<div class="summary-item"><div class="val">'+s.invoice_count+'</div><div class="label">Invoices</div></div>'+
+            '<div class="summary-item"><div class="val">'+s.expense_count+'</div><div class="label">Expenses</div></div>';
+
+        // Deadlines
+        document.getElementById('deadlines').innerHTML = data.deadlines.map(d =>
+            '<div class="obligation'+(d.urgent?' urgent':'')+'"><strong>'+d.label+'</strong> &mdash; '+d.deadline+
+            ' <span class="deadline-badge '+(d.urgent?'urgent':'normal')+'">'+(d.days_left<=0?'OVERDUE':d.days_left+' days left')+'</span></div>'
+        ).join('') || '<p style="color:#666;">No deadlines in the next 30 days.</p>';
+
+        // Obligations
+        document.getElementById('obligations').innerHTML = data.obligations.map(o =>
+            '<div class="obligation"><strong>'+o.label+'</strong><br>Amount: <strong>KES '+fmt(o.amount)+'</strong><br>'+o.details+'<br><em>'+o.action+'</em></div>'
+        ).join('') || '<p style="color:#666;">No obligations detected yet. Add invoices and expenses.</p>';
+
+        // Recommendations
+        document.getElementById('recommendations').innerHTML = data.recommendations.map(r =>
+            '<div class="rec '+r.priority+'"><strong>'+r.message+'</strong><br><em>'+r.action+'</em></div>'
+        ).join('');
+    } catch(e) { loading.innerHTML = '<div class="alert alert-danger">Error: '+e.message+'</div>'; }
+    finally { btn.disabled = false; btn.textContent = 'Analyze My Tax Obligations'; }
+}
+
+async function autoPrepare() {
+    const type = document.getElementById('prepReturnType').value;
+    const div = document.getElementById('prepResult');
+    div.classList.remove('hidden');
+    div.innerHTML = '<div class="loading">Preparing '+type+' return...</div>';
+    try {
+        const res = await fetch('/api/agent/prepare', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({return_type:type})});
+        const data = await res.json();
+        if(data.error) { div.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+        let html = '<div class="agent-card"><h3>'+data.return_type.toUpperCase()+' Return (Auto-Filled)</h3>';
+        html += '<p style="color:#666;">'+data.source+'</p>';
+        if(data.instructions) html += '<div class="alert alert-info">'+data.instructions.map((s,i)=>(i+1)+'. '+s).join('<br>')+'</div>';
+        html += '<table style="width:100%;margin-top:12px;">';
+        for(const [k,v] of Object.entries(data.data||{})) {
+            if(typeof v !== 'object') html += '<tr><td style="padding:6px 0;color:#666;">'+k.replace(/_/g,' ')+'</td><td style="padding:6px 0;font-weight:600;text-align:right;">'+(typeof v==='number'?'KES '+fmt(v):v)+'</td></tr>';
+        }
+        html += '</table>';
+        if(data.csv_available) html += '<button class="btn btn-blue" style="margin-top:12px;" onclick="downloadCSV(\''+type+'\')">Download CSV for iTax</button>';
+        html += '</div>';
+        div.innerHTML = html;
+    } catch(e) { div.innerHTML = '<div class="alert alert-danger">Error: '+e.message+'</div>'; }
+}
+
+async function downloadCSV(type) {
+    const res = await fetch('/api/agent/csv?type='+type);
+    const blob = await res.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'kenyacomply_'+type+'_return.csv'; a.click();
+}
+
+async function askAdvisor(e) {
+    e.preventDefault();
+    const input = document.getElementById('chatInput');
+    const q = input.value.trim(); if(!q) return;
+    const box = document.getElementById('chatBox');
+    box.innerHTML += '<div class="chat-msg user">'+q+'</div>';
+    input.value = '';
+    box.innerHTML += '<div class="chat-msg ai" id="typing" style="color:#999;">Thinking...</div>';
+    box.scrollTop = box.scrollHeight;
+    try {
+        const res = await fetch('/api/agent/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question:q})});
+        const data = await res.json();
+        document.getElementById('typing').remove();
+        box.innerHTML += '<div class="chat-msg ai">'+(data.answer||'Sorry, I could not process that.').replace(/\\n/g,'<br>').replace(/\\*\\*(.*?)\\*\\*/g,'<strong>$1</strong>')+'</div>';
+    } catch(err) {
+        document.getElementById('typing').remove();
+        box.innerHTML += '<div class="chat-msg ai" style="color:#dc3545;">Error: '+err.message+'</div>';
+    }
+    box.scrollTop = box.scrollHeight;
+}
+
+function fmt(n) { return Number(n||0).toLocaleString('en-KE',{minimumFractionDigits:0,maximumFractionDigits:0}); }
+</script>
+""" + FOOTER_HTML + "</body></html>")
+
+
+@app.route("/api/agent/analyze")
+def api_agent_analyze():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({"error": "Please log in to use the AI agent"})
+    invoices = get_invoices(uid)
+    expenses = get_expenses(uid)
+    payroll_runs = get_payroll_runs(uid)
+    employees = get_employees(uid)
+    businesses = get_businesses(uid)
+    result = analyze_user_data(invoices, expenses, payroll_runs, employees, businesses)
+    return jsonify(result)
+
+
+@app.route("/api/agent/prepare", methods=["POST"])
+def api_agent_prepare():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({"error": "Please log in to use the AI agent"})
+    data = request.json
+    return_type = data.get("return_type", "income_tax")
+    user_data = {
+        'invoices': get_invoices(uid),
+        'expenses': get_expenses(uid),
+        'payroll_runs': get_payroll_runs(uid),
+    }
+    result = auto_prepare_return(return_type, user_data)
+    if return_type in ('paye', 'vat'):
+        result['csv_available'] = True
+    return jsonify(result)
+
+
+@app.route("/api/agent/csv")
+def api_agent_csv():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({"error": "Please log in"})
+    return_type = request.args.get('type', 'paye')
+    user_data = {
+        'invoices': get_invoices(uid),
+        'expenses': get_expenses(uid),
+        'payroll_runs': get_payroll_runs(uid),
+    }
+    prepared = auto_prepare_return(return_type, user_data)
+    csv_data = generate_filing_csv(return_type, prepared.get('data', {}))
+    from flask import Response
+    return Response(csv_data, mimetype='text/csv',
+                    headers={"Content-Disposition": f"attachment;filename=kenyacomply_{return_type}_return.csv"})
+
+
+@app.route("/api/agent/ask", methods=["POST"])
+def api_agent_ask():
+    uid = session.get('user_id')
+    context = None
+    if uid:
+        context = {
+            'invoices': len(get_invoices(uid)),
+            'expenses': len(get_expenses(uid)),
+            'businesses': len(get_businesses(uid)),
+        }
+    question = request.json.get("question", "")
+    if not question:
+        return jsonify({"error": "Please provide a question"})
+    result = ask_tax_advisor(question, context)
+    return jsonify(result)
+
+
 @app.route("/health")
 def health():
-    return {"status": "ok", "service": "kenya-comply", "version": "3.0", "db": "supabase" if not DB_DEMO_MODE else "in-memory"}
+    return {"status": "ok", "service": "kenya-comply", "version": "3.1", "db": "supabase" if not DB_DEMO_MODE else "in-memory"}
 
 # Run the app
 app.debug = True
