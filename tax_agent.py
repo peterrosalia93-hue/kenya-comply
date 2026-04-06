@@ -9,8 +9,8 @@ from tax_calculator import (
     calculate_turnover_tax, calculate_withholding_tax
 )
 
-# Optional: OpenAI API for natural language tax advice
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+# Optional: Google Gemini API for natural language tax advice
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 try:
     import requests as http_requests
@@ -426,7 +426,7 @@ def generate_filing_csv(return_type, return_data):
 
 
 # ============================================
-# AI TAX ADVISOR (OpenAI API)
+# AI TAX ADVISOR (Google Gemini API)
 # ============================================
 SYSTEM_PROMPT = """You are KenyaComply Tax Advisor, an AI assistant specializing in Kenyan tax law and KRA compliance.
 
@@ -457,35 +457,29 @@ Be concise but thorough. If unsure about a specific regulation, say so.
 def ask_tax_advisor(question, user_context=None):
     """
     Ask the AI tax advisor a question.
-    Uses OpenAI API if available, otherwise falls back to rule-based answers.
+    Uses Google Gemini API if available, otherwise falls back to rule-based answers.
     """
-    # Try OpenAI API first
-    if OPENAI_API_KEY and http_requests:
+    # Try Gemini API first
+    if GEMINI_API_KEY and http_requests:
         try:
             user_message = question
             if user_context:
                 user_message = f"User context: {json.dumps(user_context)}\n\nQuestion: {question}"
 
             resp = http_requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json"
-                },
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
                 json={
-                    "model": "gpt-4o-mini",
-                    "max_tokens": 1024,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message}
-                    ]
+                    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                    "contents": [{"parts": [{"text": user_message}]}],
+                    "generationConfig": {"maxOutputTokens": 1024}
                 },
                 timeout=30
             )
 
             if resp.status_code == 200:
                 result = resp.json()
-                text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                 if text:
                     return {"status": "success", "answer": text, "source": "ai"}
         except Exception:
