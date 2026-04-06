@@ -947,6 +947,11 @@ TAX_RETURNS_HTML = """
         .info-box h4 { color: #1565c0; margin-bottom: 5px; }
         .warning { background: #fff3cd; padding: 12px; border-radius: 8px; color: #856404; margin: 10px 0; font-weight: 600; text-align: center; }
         .emp-row { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e0e0e0; }
+        .mpesa-btn { background: #4CAF50; }
+        .mpesa-btn:hover { background: #388E3C; }
+        .payment-notice { background: #fff3cd; color: #856404; padding: 12px; border-radius: 8px; margin: 10px 0; font-weight: 600; text-align: center; }
+        .payment-status { background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin: 10px 0; text-align: center; font-weight: 600; }
+        .payment-error { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 8px; margin: 10px 0; text-align: center; font-weight: 600; }
         .hidden { display: none; }
         footer { text-align: center; padding: 20px; opacity: 0.6; font-size: 0.9rem; }
         @media (max-width: 600px) { .container { padding: 10px; } .card { padding: 20px; } h1 { font-size: 1.6rem; } }
@@ -956,7 +961,7 @@ TAX_RETURNS_HTML = """
     <div class="container">
         <header>
             <h1>File Tax Returns</h1>
-            <p>Prepare your KRA tax return data, then file on iTax</p>
+            <p>Prepare your KRA tax return data, then file on iTax (KES 100 filing fee)</p>
             <div class="nav">
                 <a href="/">Home</a>
                 <a href="/dashboard">Dashboard</a>
@@ -1010,7 +1015,11 @@ TAX_RETURNS_HTML = """
                         <input type="number" name="withholding_tax" placeholder="0" value="0">
                     </div>
                 </div>
-                <button type="submit" class="primary">Calculate Income Tax Return</button>
+                <div class="form-group">
+                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
+                    <input type="tel" name="phone" placeholder="07XX XXX XXX" required>
+                </div>
+                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate Return</button>
             </form>
             <div id="incomeResult" class="result hidden"></div>
         </div>
@@ -1042,7 +1051,11 @@ TAX_RETURNS_HTML = """
                     </div>
                 </div>
                 <button type="button" onclick="addEmployee()" style="background:#e8f5e9; color:#2e7d32; border:2px solid #2e7d32; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:600; margin-bottom:15px;">+ Add Employee</button>
-                <button type="submit" class="primary">Calculate PAYE Return</button>
+                <div class="form-group">
+                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
+                    <input type="tel" name="phone" id="payePhone" placeholder="07XX XXX XXX" required>
+                </div>
+                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate PAYE Return</button>
             </form>
             <div id="payeReturnResult" class="result hidden"></div>
         </div>
@@ -1078,7 +1091,11 @@ TAX_RETURNS_HTML = """
                         <input type="number" name="input_vat" placeholder="0" value="0">
                     </div>
                 </div>
-                <button type="submit" class="primary">Calculate VAT Return</button>
+                <div class="form-group">
+                    <label>M-Pesa Phone (for KES 100 filing fee)</label>
+                    <input type="tel" name="phone" id="vatPhone" placeholder="07XX XXX XXX" required>
+                </div>
+                <button type="submit" class="primary mpesa-btn">Pay KES 100 & Calculate VAT Return</button>
             </form>
             <div id="vatReturnResult" class="result hidden"></div>
         </div>
@@ -1108,10 +1125,54 @@ TAX_RETURNS_HTML = """
             list.appendChild(row);
         }
 
+        // M-Pesa payment helper for tax returns (KES 100)
+        async function payAndProcess(phone, resultEl, processCallback) {
+            resultEl.innerHTML = '<div class="payment-notice">Sending M-Pesa STK Push for KES 100 filing fee...</div>';
+            resultEl.classList.remove('hidden');
+            try {
+                const payResp = await fetch('/api/payment/initiate', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone, amount: 100, account_ref: 'KenyaComply Tax Return'})
+                });
+                const payResult = await payResp.json();
+                if (payResult.status !== 'success') {
+                    resultEl.innerHTML = '<div class="payment-error">Payment failed: ' + payResult.message + '</div>';
+                    return;
+                }
+                const txRef = payResult.data.tx_ref;
+                resultEl.innerHTML = '<div class="payment-status">STK Push sent! Check your phone for M-Pesa prompt.</div>';
+                let confirmed = payResult.data.demo;
+                if (!confirmed) {
+                    resultEl.innerHTML += '<div class="payment-notice">Waiting for payment confirmation...</div>';
+                    for (let i = 0; i < 6; i++) {
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        const vResp = await fetch('/api/payment/verify/' + txRef);
+                        const vResult = await vResp.json();
+                        if (vResult.status === 'success') { confirmed = true; break; }
+                        if (vResult.status === 'cancelled' || vResult.status === 'error') {
+                            resultEl.innerHTML = '<div class="payment-error">Payment ' + vResult.status + ': ' + vResult.message + '</div>';
+                            return;
+                        }
+                    }
+                }
+                if (!confirmed) {
+                    resultEl.innerHTML = '<div class="payment-notice">Payment not yet confirmed. Please try again.</div>';
+                    return;
+                }
+                resultEl.innerHTML = '<div class="payment-status">KES 100 filing fee paid via M-Pesa</div>';
+                await processCallback(resultEl);
+            } catch(err) {
+                resultEl.innerHTML = '<div class="payment-error">Error: ' + err.message + '</div>';
+            }
+        }
+
         // Income Tax Return
         document.getElementById('incomeForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fd = new FormData(e.target);
+            const phone = fd.get('phone');
+            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
+            const el = document.getElementById('incomeResult');
             const data = {
                 return_type: 'income_tax',
                 tax_year: fd.get('tax_year'),
@@ -1121,37 +1182,39 @@ TAX_RETURNS_HTML = """
                 paye_already_paid: parseFloat(fd.get('paye_already_paid') || 0),
                 withholding_tax: parseFloat(fd.get('withholding_tax') || 0)
             };
-            const resp = await fetch('/api/tax-return', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
+            await payAndProcess(phone, el, async (resultEl) => {
+                const resp = await fetch('/api/tax-return', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const r = await resp.json();
+                const balanceClass = r.tax_balance < 0 ? 'color:#2e7d32' : 'color:#d32f2f';
+                resultEl.innerHTML += `
+                    <h3>Income Tax Return - ${r.tax_year}</h3>
+                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
+                    <div class="result-row"><span>Employment Income</span><span>${fmt(r.employment_income)}</span></div>
+                    <div class="result-row"><span>Other Income</span><span>${fmt(r.other_income)}</span></div>
+                    <div class="result-row"><span>Total Income</span><span>${fmt(r.total_income)}</span></div>
+                    <div class="result-row"><span>NSSF Deduction</span><span>${fmt(r.nssf_deduction)}</span></div>
+                    <div class="result-row"><span>Other Deductions</span><span>${fmt(r.other_deductions)}</span></div>
+                    <div class="result-row"><span>Taxable Income</span><span>${fmt(r.taxable_income)}</span></div>
+                    <div class="result-row"><span>Tax Charged</span><span>${fmt(r.tax_charged)}</span></div>
+                    <div class="result-row"><span>Personal Relief</span><span>${fmt(r.personal_relief)}</span></div>
+                    <div class="result-row"><span>PAYE Already Paid</span><span>${fmt(r.paye_already_paid)}</span></div>
+                    <div class="result-row"><span>Withholding Tax</span><span>${fmt(r.withholding_tax)}</span></div>
+                    <div class="result-row total"><span>${r.refund_or_payable}</span><span style="${balanceClass}">${fmt(Math.abs(r.tax_balance))}</span></div>
+                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File on iTax:</h4>
+                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
+                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
+                `;
             });
-            const r = await resp.json();
-            const el = document.getElementById('incomeResult');
-            const balanceClass = r.tax_balance < 0 ? 'color:#2e7d32' : 'color:#d32f2f';
-            el.innerHTML = `
-                <h3>Income Tax Return - ${r.tax_year}</h3>
-                <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                <div class="result-row"><span>Employment Income</span><span>${fmt(r.employment_income)}</span></div>
-                <div class="result-row"><span>Other Income</span><span>${fmt(r.other_income)}</span></div>
-                <div class="result-row"><span>Total Income</span><span>${fmt(r.total_income)}</span></div>
-                <div class="result-row"><span>NSSF Deduction</span><span>${fmt(r.nssf_deduction)}</span></div>
-                <div class="result-row"><span>Other Deductions</span><span>${fmt(r.other_deductions)}</span></div>
-                <div class="result-row"><span>Taxable Income</span><span>${fmt(r.taxable_income)}</span></div>
-                <div class="result-row"><span>Tax Charged</span><span>${fmt(r.tax_charged)}</span></div>
-                <div class="result-row"><span>Personal Relief</span><span>${fmt(r.personal_relief)}</span></div>
-                <div class="result-row"><span>PAYE Already Paid</span><span>${fmt(r.paye_already_paid)}</span></div>
-                <div class="result-row"><span>Withholding Tax</span><span>${fmt(r.withholding_tax)}</span></div>
-                <div class="result-row total"><span>${r.refund_or_payable}</span><span style="${balanceClass}">${fmt(Math.abs(r.tax_balance))}</span></div>
-                <h4 style="margin-top:20px; color:#1565c0;">Steps to File on iTax:</h4>
-                <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-            `;
-            el.classList.remove('hidden');
         });
 
         // PAYE Return
         document.getElementById('payeReturnForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const phone = document.getElementById('payePhone').value;
+            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
             const employees = [];
             document.querySelectorAll('.emp-row').forEach(row => {
                 const name = row.querySelector('.emp-name').value;
@@ -1161,36 +1224,39 @@ TAX_RETURNS_HTML = """
             });
             if (!employees.length) { alert('Add at least one employee'); return; }
             const period = document.getElementById('payePeriod').value;
-            const resp = await fetch('/api/tax-return', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({return_type: 'paye', period, employees})
-            });
-            const r = await resp.json();
             const el = document.getElementById('payeReturnResult');
-            let empRows = r.employees.map(e =>
-                `<div class="emp-row"><div class="row">
-                    <div class="col"><strong>${e.name || 'Employee'}</strong> (${e.pin || 'N/A'})</div>
-                    <div class="col">Gross: ${fmt(e.gross)}</div>
-                    <div class="col">PAYE: ${fmt(e.paye)}</div>
-                    <div class="col">Net: ${fmt(e.net)}</div>
-                </div></div>`
-            ).join('');
-            el.innerHTML = `
-                <h3>PAYE Return (P10) - ${r.period}</h3>
-                <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                <div class="result-row"><span>Employees</span><span>${r.total_employees}</span></div>
-                ${empRows}
-                <div class="result-row total"><span>Total PAYE Due</span><span>${fmt(r.total_paye)}</span></div>
-                <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
-                <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-            `;
-            el.classList.remove('hidden');
+            await payAndProcess(phone, el, async (resultEl) => {
+                const resp = await fetch('/api/tax-return', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({return_type: 'paye', period, employees})
+                });
+                const r = await resp.json();
+                let empRows = r.employees.map(e =>
+                    `<div class="emp-row"><div class="row">
+                        <div class="col"><strong>${e.name || 'Employee'}</strong> (${e.pin || 'N/A'})</div>
+                        <div class="col">Gross: ${fmt(e.gross)}</div>
+                        <div class="col">PAYE: ${fmt(e.paye)}</div>
+                        <div class="col">Net: ${fmt(e.net)}</div>
+                    </div></div>`
+                ).join('');
+                resultEl.innerHTML += `
+                    <h3>PAYE Return (P10) - ${r.period}</h3>
+                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
+                    <div class="result-row"><span>Employees</span><span>${r.total_employees}</span></div>
+                    ${empRows}
+                    <div class="result-row total"><span>Total PAYE Due</span><span>${fmt(r.total_paye)}</span></div>
+                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
+                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
+                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
+                `;
+            });
         });
 
         // VAT Return
         document.getElementById('vatReturnForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const phone = document.getElementById('vatPhone').value;
+            if (!phone || phone.replace(/\\s/g,'').length < 10) { alert('Enter a valid M-Pesa phone number'); return; }
             const fd = new FormData(e.target);
             const data = {
                 return_type: 'vat',
@@ -1199,25 +1265,26 @@ TAX_RETURNS_HTML = """
                 exempt_sales: parseFloat(fd.get('exempt_sales') || 0),
                 input_vat: parseFloat(fd.get('input_vat') || 0)
             };
-            const resp = await fetch('/api/tax-return', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
-            });
-            const r = await resp.json();
             const el = document.getElementById('vatReturnResult');
-            el.innerHTML = `
-                <h3>VAT Return - ${r.period}</h3>
-                <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
-                <div class="result-row"><span>Output Sales</span><span>${fmt(r.output_sales)}</span></div>
-                <div class="result-row"><span>Exempt Sales</span><span>${fmt(r.exempt_sales)}</span></div>
-                <div class="result-row"><span>VAT Collected (16%)</span><span>${fmt(r.vat_collected)}</span></div>
-                <div class="result-row"><span>Input VAT</span><span>${fmt(r.input_vat)}</span></div>
-                <div class="result-row total"><span>Net VAT Payable</span><span>${fmt(r.net_vat_payable)}</span></div>
-                <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
-                <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
-                <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
-            `;
-            el.classList.remove('hidden');
+            await payAndProcess(phone, el, async (resultEl) => {
+                const resp = await fetch('/api/tax-return', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const r = await resp.json();
+                resultEl.innerHTML += `
+                    <h3>VAT Return - ${r.period}</h3>
+                    <div class="result-row"><span>Ref</span><span>${r.ref}</span></div>
+                    <div class="result-row"><span>Output Sales</span><span>${fmt(r.output_sales)}</span></div>
+                    <div class="result-row"><span>Exempt Sales</span><span>${fmt(r.exempt_sales)}</span></div>
+                    <div class="result-row"><span>VAT Collected (16%)</span><span>${fmt(r.vat_collected)}</span></div>
+                    <div class="result-row"><span>Input VAT</span><span>${fmt(r.input_vat)}</span></div>
+                    <div class="result-row total"><span>Net VAT Payable</span><span>${fmt(r.net_vat_payable)}</span></div>
+                    <h4 style="margin-top:20px; color:#1565c0;">Steps to File:</h4>
+                    <ol class="steps">${r.filing_steps.map(s => '<li>' + s + '</li>').join('')}</ol>
+                    <a href="https://itax.kra.go.ke" target="_blank" class="itax-btn">Open iTax Portal</a>
+                `;
+            });
         });
     </script>
 </body>
